@@ -3,7 +3,8 @@ import sqlite3
 import hashlib
 from datetime import date
 import os
-# import time  <-- Eliminamos import no usado
+import json
+import time
 
 # --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS CON MANEJO DE ERRORES ---
 try:
@@ -20,7 +21,7 @@ except ImportError:
 try:
     import xlsxwriter
 except ImportError:
-    print("⚠️ ADVERTENCIA: 'xlsxwriter' no está instalado. La exportación a Excel fallará.")
+    print("⚠️ ADVERTENCIA: 'xlsxwriter' no está instalado.")
 
 try:
     import firebase_admin
@@ -28,347 +29,448 @@ try:
 except ImportError:
     firebase_admin = None
     firestore = None
-    print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado.")
+    print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado. Se usará SQLite localmente.")
 
 # ======================================================================
-# 1. LÓGICA DE BASE DE DATOS (Backend con Firestore Optimizado)
+# 1. LÓGICA DE BASE DE DATOS (Híbrido: Firestore Cloud / SQLite Local)
 # ======================================================================
 
-db = None
+DB_NAME = 'asistencia_alumnos.db'
+db_firestore = None # Cliente Firestore global
 app_id = "asistencia-unsam-app"
 
-def init_firestore():
-    """Inicializa la conexión a Firestore."""
-    global db, app_id
+def get_sqlite_conn():
+    """Conexión para modo local (SQLite)."""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
+
+def init_backend():
+    """Inicializa Firestore si es posible, sino recurre a SQLite."""
+    global db_firestore, app_id
     
-    # Intenta obtener configuración del entorno (Render/Deta)
+    # 1. Inicializar SQLite (Siempre necesario por si acaso o para híbrido)
+    init_sqlite_db()
+
+    # 2. Intentar Inicializar Firestore
     firebase_config_str = os.environ.get('__firebase_config', None)
-    app_id = os.environ.get('__app_id', 'asistencia-local')
+    app_id = os.environ.get('__app_id', 'local-dev')
 
-    if firebase_admin is None: return False
-
-    if not firebase_admin._apps:
+    if firebase_admin and firebase_config_str:
         try:
-            if firebase_config_str:
-                # Producción
-                import json
+            if not firebase_admin._apps:
                 cred_dict = json.loads(firebase_config_str)
                 cred = credentials.Certificate(cred_dict) if "private_key" in cred_dict else credentials.ApplicationDefault()
                 firebase_admin.initialize_app(cred)
-            else:
-                # Desarrollo Local (Mock o Credenciales por defecto)
-                # Si tienes un archivo serviceAccountKey.json local, úsalo aquí:
-                # cred = credentials.Certificate("serviceAccountKey.json")
-                # firebase_admin.initialize_app(cred)
-                pass 
-                
-            db = firestore.client()
-            print("Conexión a Firestore exitosa.")
+            db_firestore = firestore.client()
+            print(f"✅ MODO NUBE: Conectado a Firestore ({app_id})")
             return True
         except Exception as e:
-            print(f"Error Firestore Init: {e}")
-            return False
+            print(f"⚠️ Error Firestore: {e}. Usando SQLite.")
     else:
-        db = firestore.client()
-        return True
+        print("ℹ️ MODO LOCAL: Usando SQLite (asistencia_alumnos.db)")
+    
+    return False # False indica que usaremos SQLite
 
-def get_collection_ref(name):
-    # Estructura: artifacts/{app_id}/public/data/{name}
-    return db.collection('artifacts').document(app_id).collection('public').document('data').collection(name)
+def init_sqlite_db():
+    conn = get_sqlite_conn()
+    cursor = conn.cursor()
+    # Esquema SQLite
+    cursor.execute("CREATE TABLE IF NOT EXISTS Usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Ciclos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, activo INTEGER DEFAULT 0)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, ciclo_id INTEGER, FOREIGN KEY (ciclo_id) REFERENCES Ciclos(id) ON DELETE CASCADE)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Alumnos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, nombre TEXT NOT NULL, dni TEXT, observaciones TEXT, tutor_nombre TEXT, tutor_telefono TEXT, UNIQUE(curso_id, nombre), FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Asistencia (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL, status TEXT NOT NULL, UNIQUE(alumno_id, fecha), FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
+    
+    # Columnas nuevas (Migración segura)
+    for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
+        try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
+        except: pass
+    
+    # Admin por defecto SQLite
+    cursor.execute("SELECT COUNT(*) FROM Usuarios")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
+    
+    # Ciclo por defecto SQLite
+    cursor.execute("SELECT COUNT(*) FROM Ciclos")
+    if cursor.fetchone()[0] == 0:
+        anio = str(date.today().year)
+        cursor.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (anio,))
+        cid = cursor.lastrowid
+        cursor.execute("UPDATE Cursos SET ciclo_id = ? WHERE ciclo_id IS NULL", (cid,))
+
+    conn.commit()
+    conn.close()
+
+def get_col(name):
+    # Helper para referencia Firestore
+    return db_firestore.collection('artifacts').document(app_id).collection('public').document('data').collection(name)
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+# ======================================================================
+# FUNCIONES CRUD (HÍBRIDAS)
+# ======================================================================
+
 # --- USUARIOS ---
 def authenticate_user(username, password):
-    if db is None: return (False, None)
-    try:
-        users = get_collection_ref('Usuarios').where('username', '==', username).limit(1).stream()
-        u_doc = next(users, None)
-        if u_doc:
-            u_data = u_doc.to_dict()
-            if u_data.get('password') == hash_password(password):
-                return (True, u_data.get('role'))
-    except Exception as e: print(e)
+    pwd = hash_password(password)
     
-    # Admin de respaldo (solo si no hay usuarios)
+    if db_firestore:
+        try:
+            # Lógica Firestore
+            q = get_col('Usuarios').where('username', '==', username).limit(1).stream()
+            doc = next(q, None)
+            if doc and doc.to_dict().get('password') == pwd:
+                return (True, doc.to_dict().get('role'))
+            # Crear admin default si la DB está vacía en la nube
+            if not doc and username=="admin" and password=="admin":
+                 if not next(get_col('Usuarios').limit(1).stream(), None):
+                     add_user("admin", "admin", "admin")
+                     return (True, "admin")
+        except: pass
+    else:
+        # Lógica SQLite
+        conn = get_sqlite_conn()
+        u = conn.execute("SELECT role FROM Usuarios WHERE username=? AND password=?", (username, pwd)).fetchone()
+        conn.close()
+        if u: return (True, u['role'])
+    
     return (False, None)
 
 def get_users():
-    if db is None: return []
-    try:
-        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Usuarios').stream()]
-    except: return []
+    if db_firestore:
+        return [{**d.to_dict(), 'id': d.id} for d in get_col('Usuarios').stream()]
+    else:
+        conn = get_sqlite_conn()
+        res = [dict(r) for r in conn.execute("SELECT * FROM Usuarios").fetchall()]
+        conn.close()
+        return res
 
 def add_user(u, p, r):
-    if db is None: return False
-    try:
-        # Verificar duplicado
-        if next(get_collection_ref('Usuarios').where('username', '==', u).limit(1).stream(), None):
-            return False
-        get_collection_ref('Usuarios').add({'username': u, 'password': hash_password(p), 'role': r})
+    hp = hash_password(p)
+    if db_firestore:
+        if next(get_col('Usuarios').where('username', '==', u).limit(1).stream(), None): return False
+        get_col('Usuarios').add({'username': u, 'password': hp, 'role': r})
         return True
-    except: return False
+    else:
+        try:
+            conn = get_sqlite_conn()
+            conn.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", (u, hp, r))
+            conn.commit(); conn.close()
+            return True
+        except: return False
 
 def delete_user(uid):
-    if db is None: return
-    get_collection_ref('Usuarios').document(uid).delete()
+    if db_firestore: get_col('Usuarios').document(uid).delete()
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("DELETE FROM Usuarios WHERE id=?", (uid,))
+        conn.commit(); conn.close()
 
 # --- CICLOS ---
 def get_ciclos():
-    if db is None: return []
-    try:
-        # Ordenar por nombre descendente (años más recientes primero)
-        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Ciclos').order_by('nombre', direction=firestore.Query.DESCENDING).stream()]
-    except: return []
+    if db_firestore:
+        return [{**d.to_dict(), 'id': d.id} for d in get_col('Ciclos').order_by('nombre', direction=firestore.Query.DESCENDING).stream()]
+    else:
+        conn = get_sqlite_conn()
+        res = [dict(r) for r in conn.execute("SELECT * FROM Ciclos ORDER BY nombre DESC").fetchall()]
+        conn.close()
+        return res
 
 def get_ciclo_activo():
-    if db is None: return None
-    try:
-        gen = get_collection_ref('Ciclos').where('activo', '==', 1).limit(1).stream()
-        doc = next(gen, None)
+    if db_firestore:
+        doc = next(get_col('Ciclos').where('activo', '==', 1).limit(1).stream(), None)
         return {**doc.to_dict(), 'id': doc.id} if doc else None
-    except: return None
+    else:
+        conn = get_sqlite_conn()
+        res = conn.execute("SELECT * FROM Ciclos WHERE activo=1").fetchone()
+        conn.close()
+        return dict(res) if res else None
 
 def add_ciclo(nombre):
-    if db is None: return False
-    try:
-        # Desactivar anteriores
-        batch = db.batch()
-        for doc in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
-            batch.update(doc.reference, {'activo': 0})
+    if db_firestore:
+        batch = db_firestore.batch()
+        for d in get_col('Ciclos').where('activo', '==', 1).stream(): batch.update(d.reference, {'activo': 0})
+        get_col('Ciclos').add({'nombre': nombre, 'activo': 1})
         batch.commit()
-        
-        get_collection_ref('Ciclos').add({'nombre': nombre, 'activo': 1})
-        return True
-    except: return False
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("UPDATE Ciclos SET activo=0")
+        conn.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (nombre,))
+        conn.commit(); conn.close()
 
 def activar_ciclo(cid):
-    if db is None: return
-    try:
-        batch = db.batch()
-        for doc in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
-            batch.update(doc.reference, {'activo': 0})
-        
-        ref = get_collection_ref('Ciclos').document(cid)
-        batch.update(ref, {'activo': 1})
+    if db_firestore:
+        batch = db_firestore.batch()
+        for d in get_col('Ciclos').where('activo', '==', 1).stream(): batch.update(d.reference, {'activo': 0})
+        batch.update(get_col('Ciclos').document(cid), {'activo': 1})
         batch.commit()
-    except: pass
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("UPDATE Ciclos SET activo=0")
+        conn.execute("UPDATE Ciclos SET activo=1 WHERE id=?", (cid,))
+        conn.commit(); conn.close()
 
 # --- CURSOS ---
 def get_cursos():
-    if db is None: return []
-    try:
-        ciclo = get_ciclo_activo()
-        if not ciclo: return []
-        # Traer cursos solo del ciclo activo
-        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).order_by('nombre').stream()]
-    except: return []
+    ciclo = get_ciclo_activo()
+    if not ciclo: return []
+    cid_active = ciclo['id']
+    
+    if db_firestore:
+        return [{**d.to_dict(), 'id': d.id} for d in get_col('Cursos').where('ciclo_id', '==', cid_active).order_by('nombre').stream()]
+    else:
+        conn = get_sqlite_conn()
+        res = [dict(r) for r in conn.execute("SELECT * FROM Cursos WHERE ciclo_id=? ORDER BY nombre", (cid_active,)).fetchall()]
+        conn.close()
+        return res
 
 def add_curso(nombre):
-    if db is None: return False
-    try:
-        ciclo = get_ciclo_activo()
-        if not ciclo: return False
-        
-        # Verificar duplicado en este ciclo
-        dup = next(get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).where('nombre', '==', nombre).limit(1).stream(), None)
-        if dup: return False
-        
-        get_collection_ref('Cursos').add({'nombre': nombre, 'ciclo_id': ciclo['id']})
+    ciclo = get_ciclo_activo()
+    if not ciclo: return False
+    
+    if db_firestore:
+        if next(get_col('Cursos').where('ciclo_id', '==', ciclo['id']).where('nombre', '==', nombre).limit(1).stream(), None): return False
+        get_col('Cursos').add({'nombre': nombre, 'ciclo_id': ciclo['id']})
         return True
-    except: return False
+    else:
+        try:
+            conn = get_sqlite_conn()
+            conn.execute("INSERT INTO Cursos (nombre, ciclo_id) VALUES (?, ?)", (nombre, ciclo['id']))
+            conn.commit(); conn.close()
+            return True
+        except: return False
 
 def delete_curso(cid):
-    if db is None: return
-    get_collection_ref('Cursos').document(cid).delete()
+    if db_firestore: get_col('Cursos').document(cid).delete()
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("DELETE FROM Cursos WHERE id=?", (cid,))
+        conn.commit(); conn.close()
 
 # --- ALUMNOS ---
 def get_alumnos(curso_id):
-    if db is None: return []
-    try:
-        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Alumnos').where('curso_id', '==', curso_id).order_by('nombre').stream()]
-    except: return []
+    if db_firestore:
+        return [{**d.to_dict(), 'id': d.id} for d in get_col('Alumnos').where('curso_id', '==', curso_id).order_by('nombre').stream()]
+    else:
+        conn = get_sqlite_conn()
+        res = [dict(r) for r in conn.execute("SELECT * FROM Alumnos WHERE curso_id=? ORDER BY nombre", (curso_id,)).fetchall()]
+        conn.close()
+        return res
 
 def get_alumno_by_id(aid):
-    if db is None: return None
-    try:
-        doc = get_collection_ref('Alumnos').document(aid).get()
+    if db_firestore:
+        doc = get_col('Alumnos').document(aid).get()
         if doc.exists:
-            data = doc.to_dict()
-            # Obtener nombre curso (opcional, extra read)
-            c_doc = get_collection_ref('Cursos').document(data['curso_id']).get()
-            data['curso_nombre'] = c_doc.to_dict().get('nombre', '?') if c_doc.exists else '?'
-            return {**data, 'id': doc.id}
-    except: pass
+            d = doc.to_dict()
+            # Join manual simple
+            c_doc = get_col('Cursos').document(d['curso_id']).get()
+            d['curso_nombre'] = c_doc.to_dict().get('nombre', '?') if c_doc.exists else '?'
+            return {**d, 'id': doc.id}
+    else:
+        conn = get_sqlite_conn()
+        row = conn.execute("SELECT a.*, c.nombre as curso_nombre FROM Alumnos a JOIN Cursos c ON a.curso_id = c.id WHERE a.id=?", (aid,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
     return None
 
 def add_alumno(curso_id, nombre, dni, obs, t_n, t_t):
-    if db is None: return False
-    try:
-        get_collection_ref('Alumnos').add({
-            'curso_id': curso_id, 'nombre': nombre, 'dni': dni, 
-            'observaciones': obs, 'tutor_nombre': t_n, 'tutor_telefono': t_t
-        })
-        return True
-    except: return False
+    data = {'curso_id': curso_id, 'nombre': nombre, 'dni': dni, 'observaciones': obs, 'tutor_nombre': t_n, 'tutor_telefono': t_t}
+    if db_firestore:
+        get_col('Alumnos').add(data)
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("INSERT INTO Alumnos (curso_id, nombre, dni, observaciones, tutor_nombre, tutor_telefono) VALUES (?,?,?,?,?,?)", 
+                     (curso_id, nombre, dni, obs, t_n, t_t))
+        conn.commit(); conn.close()
 
 def update_alumno(aid, nombre, dni, obs, t_n, t_t):
-    if db is None: return
-    get_collection_ref('Alumnos').document(aid).update({
-        'nombre': nombre, 'dni': dni, 'observaciones': obs, 
-        'tutor_nombre': t_n, 'tutor_telefono': t_t
-    })
+    data = {'nombre': nombre, 'dni': dni, 'observaciones': obs, 'tutor_nombre': t_n, 'tutor_telefono': t_t}
+    if db_firestore:
+        get_col('Alumnos').document(aid).update(data)
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("UPDATE Alumnos SET nombre=?, dni=?, observaciones=?, tutor_nombre=?, tutor_telefono=? WHERE id=?", 
+                     (nombre, dni, obs, t_n, t_t, aid))
+        conn.commit(); conn.close()
 
 def delete_alumno(aid):
-    if db is None: return
-    get_collection_ref('Alumnos').document(aid).delete()
+    if db_firestore: get_col('Alumnos').document(aid).delete()
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("DELETE FROM Alumnos WHERE id=?", (aid,))
+        conn.commit(); conn.close()
 
 def search_students(term):
-    if db is None: return []
-    # Firestore no tiene "LIKE". Traemos todos los del ciclo activo y filtramos en Python.
-    # (Para < 1000 alumnos es aceptable).
-    try:
-        cursos_activos = {c['id']: c['nombre'] for c in get_cursos()}
-        if not cursos_activos: return []
+    # Búsqueda híbrida
+    term = term.lower()
+    results = []
+    
+    if db_firestore:
+        # Búsqueda en memoria sobre ciclo activo (limitación Firestore)
+        try:
+            act_ciclo = get_ciclo_activo()
+            if not act_ciclo: return []
+            
+            # Obtener IDs de cursos activos
+            act_cursos = {c['id']: c['nombre'] for c in get_cursos()}
+            
+            all_alumnos = get_col('Alumnos').stream()
+            for doc in all_alumnos:
+                d = doc.to_dict()
+                if d.get('curso_id') in act_cursos:
+                    if term in d.get('nombre','').lower() or term in d.get('dni',''):
+                        d['id'] = doc.id
+                        d['curso_nombre'] = act_cursos[d['curso_id']]
+                        d['ciclo_nombre'] = act_ciclo['nombre']
+                        results.append(d)
+        except: pass
+    else:
+        # Búsqueda SQL
+        conn = get_sqlite_conn()
+        rows = conn.execute("""
+            SELECT a.*, c.nombre as curso_nombre, ci.nombre as ciclo_nombre 
+            FROM Alumnos a 
+            JOIN Cursos c ON a.curso_id = c.id 
+            JOIN Ciclos ci ON c.ciclo_id = ci.id 
+            WHERE (lower(a.nombre) LIKE ? OR a.dni LIKE ?) AND ci.activo=1
+        """, (f"%{term}%", f"%{term}%")).fetchall()
+        conn.close()
+        results = [dict(r) for r in rows]
         
-        term = term.lower()
-        res = []
-        # Optimización: Podríamos filtrar por curso en la query si tuviéramos índice
-        # Por ahora, stream completo de Alumnos (cuidado con costos si escala mucho)
-        all_alumnos = get_collection_ref('Alumnos').stream()
-        
-        for doc in all_alumnos:
-            d = doc.to_dict()
-            if d.get('curso_id') in cursos_activos:
-                if term in d.get('nombre', '').lower() or term in d.get('dni', ''):
-                    d['id'] = doc.id
-                    d['curso_nombre'] = cursos_activos[d['curso_id']]
-                    res.append(d)
-        return sorted(res, key=lambda x: x['nombre'])
-    except: return []
+    return sorted(results, key=lambda x: x['nombre'])
 
-# --- ASISTENCIA (Optimizado) ---
+# --- ASISTENCIA ---
 def register_asistencia(aid, cid, fecha, status):
-    if db is None: return
-    try:
+    if db_firestore:
         doc_id = f"{aid}_{fecha}"
-        # OPTIMIZACIÓN: Guardamos también curso_id para facilitar queries
-        get_collection_ref('Asistencia').document(doc_id).set({
-            'alumno_id': aid, 
-            'curso_id': cid, # Nuevo campo para optimizar lectura
-            'fecha': fecha, 
-            'status': status
-        }, merge=True)
-    except Exception as e: print(e)
+        get_col('Asistencia').document(doc_id).set({'alumno_id': aid, 'curso_id': cid, 'fecha': fecha, 'status': status}, merge=True)
+    else:
+        conn = get_sqlite_conn()
+        conn.execute("INSERT OR REPLACE INTO Asistencia (alumno_id, fecha, status) VALUES (?, ?, ?)", (aid, fecha, status))
+        conn.commit(); conn.close()
 
 def get_asistencia_diaria(curso_id, fecha):
-    if db is None: return {}
-    try:
-        # OPTIMIZACIÓN: Filtramos por curso y fecha. 
-        # (Requiere índice compuesto en Firestore si hay muchos datos, pero es más eficiente que traer todo)
-        # Si falla por falta de índice, Firestore lanzará error con link para crearlo.
-        # Fallback: Si no hay curso_id en documentos viejos, traer solo por fecha.
-        
-        # Intento optimizado:
+    if db_firestore:
         try:
-            query = get_collection_ref('Asistencia').where('curso_id', '==', curso_id).where('fecha', '==', fecha)
-            rows = query.stream()
-        except:
-            # Fallback a solo fecha (menos eficiente)
-            rows = get_collection_ref('Asistencia').where('fecha', '==', fecha).stream()
-
-        res = {}
-        for r in rows:
-            d = r.to_dict()
-            # Doble chequeo por si usamos el fallback
-            res[d['alumno_id']] = d['status']
-        return res
-    except: return {}
+            # Intento optimizado
+            rows = get_col('Asistencia').where('curso_id', '==', curso_id).where('fecha', '==', fecha).stream()
+            return {r.to_dict()['alumno_id']: r.to_dict()['status'] for r in rows}
+        except: 
+            # Fallback
+            rows = get_col('Asistencia').where('fecha', '==', fecha).stream()
+            return {r.to_dict()['alumno_id']: r.to_dict()['status'] for r in rows}
+    else:
+        conn = get_sqlite_conn()
+        # SQL simple, no necesita optimización de curso_id en tabla asistencia porque join es barato
+        rows = conn.execute("""
+            SELECT a.id, asis.status FROM Alumnos a 
+            LEFT JOIN Asistencia asis ON a.id = asis.alumno_id AND asis.fecha = ? 
+            WHERE a.curso_id = ?
+        """, (fecha, curso_id)).fetchall()
+        conn.close()
+        return {r['id']: r['status'] for r in rows if r['status']}
 
 def get_report_data(curso_id, start, end):
-    if db is None: return []
-    try:
-        alumnos = get_alumnos(curso_id)
-        report = []
-        
-        # Para optimizar reportes, traemos TODA la asistencia del curso en ese rango
-        # en lugar de 1 query por alumno.
+    alumnos = get_alumnos(curso_id)
+    report = []
+    
+    # Pre-cargar datos de asistencia
+    asis_map = {} # {aid: [statuses]}
+    
+    if db_firestore:
         try:
-            asis_query = get_collection_ref('Asistencia').where('curso_id', '==', curso_id)\
-                .where('fecha', '>=', start).where('fecha', '<=', end).stream()
-            
-            # Mapear asistencia en memoria
-            asis_map = {} # {alumno_id: [status, ...]}
-            for doc in asis_query:
+            q = get_col('Asistencia').where('curso_id', '==', curso_id).where('fecha', '>=', start).where('fecha', '<=', end).stream()
+            for doc in q:
                 d = doc.to_dict()
                 aid = d['alumno_id']
                 if aid not in asis_map: asis_map[aid] = []
                 asis_map[aid].append(d['status'])
-        except:
-            # Si falla (ej: falta índice), volvemos al método lento (1 query por alumno) o vacío
-            print("Falta índice compuesto curso_id + fecha. Usando método lento.")
-            asis_map = {} # Implementar fallback si es necesario
-            # Por simplicidad del ejemplo, asumimos que el índice se creará o usamos lógica simple
-            pass
+        except: pass # Fallback a lista vacía o consulta individual si falla índice
+    else:
+        conn = get_sqlite_conn()
+        rows = conn.execute("""
+            SELECT alumno_id, status FROM Asistencia 
+            WHERE fecha >= ? AND fecha <= ? AND alumno_id IN (SELECT id FROM Alumnos WHERE curso_id=?)
+        """, (start, end, curso_id)).fetchall()
+        conn.close()
+        for r in rows:
+            aid = r['alumno_id']
+            if aid not in asis_map: asis_map[aid] = []
+            asis_map[aid].append(r['status'])
 
-        for a in alumnos:
-            statuses = asis_map.get(a['id'], [])
-            # Fallback method if asis_map is empty due to index error (slow individual queries)
-            if not asis_map:
-                 q = get_collection_ref('Asistencia').where('alumno_id', '==', a['id'])\
-                     .where('fecha', '>=', start).where('fecha', '<=', end).stream()
-                 statuses = [d.to_dict().get('status') for d in q]
+    for a in alumnos:
+        statuses = asis_map.get(a['id'], [])
+        counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
+        faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
+        total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
+        pct = (faltas/total*100) if total > 0 else 0
+        
+        report.append({
+            'nombre': a['nombre'], 'dni': a.get('dni','-'),
+            'p': counts['P'], 't': counts['T'], 'a': counts['A'], 
+            'j': counts['J'], 's': counts['S'], 
+            'faltas': faltas, 'pct': round(pct, 1)
+        })
+    return report
 
-            counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
-            
-            faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
-            total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
-            pct = (faltas/total*100) if total > 0 else 0
-            
-            report.append({
-                'nombre': a['nombre'], 'dni': a['dni'], 
-                'tutor': a.get('tutor_nombre', '-'), 'tel': a.get('tutor_telefono', '-'),
-                'p': counts['P'], 't': counts['T'], 'a': counts['A'], 
-                'j': counts['J'], 's': counts['S'], 
-                'faltas': faltas, 'pct': round(pct, 1)
-            })
-        return report
-    except Exception as e: 
-        print(e)
-        return []
+# --- REQUISITOS (Simplificado híbrido) ---
+def crud_req(action, **kwargs):
+    if db_firestore:
+        col = get_col('Requisitos')
+        if action=='get': return [{**d.to_dict(), 'id': d.id} for d in col.where('curso_id', '==', kwargs['cid']).stream()]
+        if action=='add': col.add({'curso_id': kwargs['cid'], 'descripcion': kwargs['desc']})
+        if action=='del': col.document(kwargs['rid']).delete()
+    else:
+        conn = get_sqlite_conn()
+        if action=='get': 
+            res = [dict(r) for r in conn.execute("SELECT * FROM Requisitos WHERE curso_id=?", (kwargs['cid'],)).fetchall()]
+            conn.close(); return res
+        if action=='add': 
+            conn.execute("INSERT INTO Requisitos (curso_id, descripcion) VALUES (?, ?)", (kwargs['cid'], kwargs['desc']))
+        if action=='del': 
+            conn.execute("DELETE FROM Requisitos WHERE id=?", (kwargs['rid'],))
+        conn.commit(); conn.close()
 
-# --- REQUISITOS ---
-def add_requisito(cid, desc):
-    if db is None: return
-    get_collection_ref('Requisitos').add({'curso_id': cid, 'descripcion': desc})
+def crud_req_done(action, **kwargs):
+    if db_firestore:
+        col = get_col('Requisitos_Cumplidos')
+        if action=='get': return {d.to_dict()['alumno_id'] for d in col.where('requisito_id', '==', kwargs['rid']).stream()}
+        if action=='toggle':
+            did = f"{kwargs['rid']}_{kwargs['aid']}"
+            if kwargs['val']: col.document(did).set({'requisito_id': kwargs['rid'], 'alumno_id': kwargs['aid']})
+            else: col.document(did).delete()
+    else:
+        conn = get_sqlite_conn()
+        if action=='get':
+            res = {r['alumno_id'] for r in conn.execute("SELECT alumno_id FROM Requisitos_Cumplidos WHERE requisito_id=?", (kwargs['rid'],)).fetchall()}
+            conn.close(); return res
+        if action=='toggle':
+            if kwargs['val']: conn.execute("INSERT OR IGNORE INTO Requisitos_Cumplidos (requisito_id, alumno_id) VALUES (?, ?)", (kwargs['rid'], kwargs['aid']))
+            else: conn.execute("DELETE FROM Requisitos_Cumplidos WHERE requisito_id=? AND alumno_id=?", (kwargs['rid'], kwargs['aid']))
+        conn.commit(); conn.close()
 
-def get_requisitos(cid):
-    if db is None: return []
-    return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Requisitos').where('curso_id', '==', cid).stream()]
-
-def delete_requisito(rid):
-    if db is None: return
-    get_collection_ref('Requisitos').document(rid).delete()
-
-def toggle_cumplimiento(rid, aid, val):
-    if db is None: return
-    doc_id = f"{rid}_{aid}"
-    ref = get_collection_ref('Requisitos_Cumplidos').document(doc_id)
-    if val: ref.set({'requisito_id': rid, 'alumno_id': aid})
-    else: ref.delete()
-
-def get_cumplimientos(rid):
-    if db is None: return set()
-    return {d.to_dict()['alumno_id'] for d in get_collection_ref('Requisitos_Cumplidos').where('requisito_id', '==', rid).stream()}
+# Wrappers para mantener firma
+def get_requisitos(cid): return crud_req('get', cid=cid)
+def add_requisito(cid, desc): crud_req('add', cid=cid, desc=desc)
+def delete_requisito(rid): crud_req('del', rid=rid)
+def get_cumplimientos(rid): return crud_req_done('get', rid=rid)
+def toggle_cumplimiento(rid, aid, val): crud_req_done('toggle', rid=rid, aid=aid, val=val)
 
 def get_student_req_status(aid, cid):
-    if db is None: return []
     reqs = get_requisitos(cid)
-    # Optimización: traer todos los cumplidos del alumno de una vez
-    done_q = get_collection_ref('Requisitos_Cumplidos').where('alumno_id', '==', aid).stream()
-    done_ids = {d.to_dict()['requisito_id'] for d in done_q}
-    return [{'desc': r['descripcion'], 'ok': r['id'] in done_ids} for r in reqs]
+    # Híbrido algo ineficiente pero funcional
+    res = []
+    for r in reqs:
+        done = get_cumplimientos(r['id'])
+        res.append({'desc': r['descripcion'], 'ok': aid in done})
+    return res
 
 
 # ======================================================================
@@ -377,11 +479,11 @@ def get_student_req_status(aid, cid):
 
 def main(page: ft.Page):
     page.title = "Asistencia UNSAM"
-    page.theme_mode = ft.ThemeMode.LIGHT
+    page.theme_mode = "light" # STRING LITERAL
     page.padding = 0
     
-    # Intenta conectar
-    connected = init_firestore()
+    # Inicializar Backend
+    init_backend()
     
     # State
     state = {"role": None, "username": None, "curso_id": None, "curso_nombre": None, "search": "", "st_view": None, "st_edit": None}
@@ -391,13 +493,10 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
-    if not connected:
-        show_snack("Error crítico: No hay conexión a Base de Datos (Firestore).", "red")
-
     # --- VISTAS ---
     def login_view():
-        user = ft.TextField(label="Usuario", width=300, bgcolor="white")
-        pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white")
+        user = ft.TextField(label="Usuario", width=300, bgcolor="white", border_radius=10)
+        pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white", border_radius=10)
         def login(e):
             ok, role = authenticate_user(user.value, pwd.value)
             if ok:
@@ -411,8 +510,9 @@ def main(page: ft.Page):
                 ft.Text("Asistencia UNSAM", size=24, weight="bold"),
                 ft.Container(height=20),
                 user, pwd,
-                ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white")
-            ], horizontal_alignment="center"), alignment=ft.alignment.center, expand=True, bgcolor="#f0f2f5")
+                ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white"),
+                ft.Text("Modo: " + ("NUBE (Firestore)" if db_firestore else "LOCAL (SQLite)"), color="grey", size=12)
+            ], horizontal_alignment="center"), alignment="center", expand=True, bgcolor="#f0f2f5")
         ])
 
     def dashboard_view():
@@ -433,8 +533,8 @@ def main(page: ft.Page):
                         ft.Text(c['nombre'], weight="bold", size=16, expand=True),
                         ft.IconButton("arrow_forward", on_click=lambda e, cid=c['id'], cn=c['nombre']: go_curso(cid, cn)),
                         ft.IconButton("delete", icon_color="red", on_click=lambda e, cid=c['id']: (delete_curso(cid), load())) if state["role"]=='admin' else ft.Container()
-                    ]),
-                    padding=15, bgcolor="white", border_radius=10, shadow=ft.BoxShadow(blur_radius=2, color="black12"), margin=5
+                    ], alignment="spaceBetween"),
+                    padding=15, bgcolor="white", border_radius=10, shadow=ft.BoxShadow(blur_radius=2, color="black"), margin=5
                 ))
             page.update()
         
@@ -463,8 +563,8 @@ def main(page: ft.Page):
                     content=ft.ListTile(
                         leading=ft.Icon("person"), title=ft.Text(a['nombre']), subtitle=ft.Text(f"DNI: {a.get('dni','-')}"),
                         trailing=ft.PopupMenuButton(items=[
-                            ft.PopupMenuItem("Editar", on_click=lambda e, aid=a['id']: (state.update({"st_edit": aid}), page.go("/form_student"))),
-                            ft.PopupMenuItem("Borrar", on_click=lambda e, aid=a['id']: (delete_alumno(aid), load()))
+                            ft.PopupMenuItem(text="Editar", on_click=lambda e, aid=a['id']: (state.update({"st_edit": aid}), page.go("/form_student"))),
+                            ft.PopupMenuItem(text="Borrar", on_click=lambda e, aid=a['id']: (delete_alumno(aid), load()))
                         ])
                     ), bgcolor="white", border_radius=10, margin=2
                 ))
@@ -534,14 +634,14 @@ def main(page: ft.Page):
                     ft.DataCell(ft.Text(str(d['p']))), ft.DataCell(ft.Text(str(d['t']))), ft.DataCell(ft.Text(str(d['a']))),
                     ft.DataCell(ft.Text(str(d['j']))), ft.DataCell(ft.Text(str(d['s']))),
                     ft.DataCell(ft.Text(f"{d['faltas']}", color=c, weight="bold")),
-                    ft.DataCell(ft.Text(f"{d['pct']}%"))
+                    ft.DataCell(ft.Text(f"{d['pct']}%", color=c, weight="bold"))
                 ]))
             
             dt = ft.DataTable(columns=[
                 ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), 
                 ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True),
                 ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True),
-                ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("%"), numeric=True)
+                ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)
             ], rows=rows, bgcolor="white", border_radius=10, column_spacing=15)
             cont.controls = [ft.Row([dt], scroll="always")]; page.update()
 
@@ -555,9 +655,7 @@ def main(page: ft.Page):
             df = pd.DataFrame(data)
             df = df.rename(columns={'nombre':'Alumno', 'p':'Pres', 't':'Tarde', 'a':'Aus', 'j':'Just', 's':'Susp', 'faltas':'Total', 'pct':'%'})
             
-            # Exportación compatible con Web
-            import io
-            import base64
+            import io, base64
             output = io.BytesIO()
             df.to_excel(output, index=False, engine='xlsxwriter')
             b64 = base64.b64encode(output.getvalue()).decode()
@@ -590,7 +688,7 @@ def main(page: ft.Page):
             ft.Divider(), ft.Text("Tutor:", weight="bold"), ft.Text(f"{s.get('tutor_nombre','-')} ({s.get('tutor_telefono','-')})"),
             ft.Divider(), ft.Text("Obs:", weight="bold"), ft.Text(s.get('observaciones','-'), italic=True),
             ft.Divider(), ft.Text("Papeles:", weight="bold"), req_col
-        ]), padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=5, color="black12"))
+        ]), padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=5, color="black"))
         
         return ft.View("/student_detail", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/search")), title=ft.Text("Ficha"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([card], scroll="auto"), padding=20, bgcolor="#f0f2f5", expand=True)])
 
@@ -689,4 +787,4 @@ def main(page: ft.Page):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, web_renderer="html")
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, host="0.0.0.0", web_renderer="html")
