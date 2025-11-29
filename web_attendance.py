@@ -432,11 +432,12 @@ def main(page: ft.Page):
         
         logo = ft.Image(src="logo_unsam.png", width=200) if os.path.exists("logo_unsam.png") else ft.Icon("school", size=80, color="blue")
         
-        return ft.View("/", [ft.Container(content=ft.Column([
-            logo, ft.Text("Sistema de Asistencia", size=24, weight="bold"),
-            ft.Text("UNSAM", size=16, color="grey"), ft.Divider(height=20, color="transparent"),
-            user, pwd, ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white")
-        ], horizontal_alignment="center"), alignment=ft.alignment.center, expand=True, bgcolor="#f0f2f5")])
+        return ft.View("/", [
+            ft.Container(content=ft.Column([
+                logo, ft.Text("Sistema de Asistencia", size=24, weight="bold"),
+                ft.Text("UNSAM", size=16, color="grey"), ft.Divider(height=20, color="transparent"),
+                user, pwd, ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white")
+            ], horizontal_alignment="center"), alignment=ft.alignment.center, expand=True, bgcolor="#f0f2f5")])
 
     def dashboard_view():
         ciclo = get_ciclo_activo()
@@ -456,7 +457,7 @@ def main(page: ft.Page):
                         ft.IconButton("arrow_forward", on_click=lambda e, cid=c['id'], cn=c['nombre']: go_curso(cid, cn)),
                         ft.IconButton("delete", icon_color="red", on_click=lambda e, cid=c['id']: (delete_curso(cid), load())) if state["role"]=='admin' else ft.Container()
                     ], alignment="spaceBetween"),
-                    padding=15, bgcolor="white", border_radius=10, shadow=ft.BoxShadow(blur_radius=2, color="black12"), margin=5
+                    padding=15, bgcolor="white", border_radius=10, shadow=ft.BoxShadow(blur_radius=2, color="black"), margin=5
                 ))
             page.update()
         
@@ -500,16 +501,15 @@ def main(page: ft.Page):
         return ft.View("/asistencia", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Asistencia"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([dp, ft.IconButton("refresh", on_click=load)]), ft.ElevatedButton("GUARDAR", on_click=save, bgcolor="green", color="white", width=float("inf")), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)])
 
     def reportes_view():
-        d1 = ft.TextField(label="Desde", value=date.today().replace(day=1).isoformat(), width=130, bgcolor="white")
-        d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white")
-        cont = ft.Column(scroll="auto", expand=True)
+        d1 = ft.TextField(label="Desde", value=date.today().replace(day=1).isoformat(), width=130, bgcolor="white"); d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white")
+        table_cont = ft.Column(scroll="auto", expand=True)
         def gen(e):
             data = get_report_data(state["curso_id"], d1.value, d2.value); rows = []
             for d in data:
                 c = "red" if d['faltas']>=25 else ("orange" if d['faltas']>=15 else "black")
                 rows.append(ft.DataRow(cells=[ft.DataCell(ft.Text(d['nombre'], color=c)), ft.DataCell(ft.Text(str(d['p']))), ft.DataCell(ft.Text(str(d['t']))), ft.DataCell(ft.Text(str(d['a']))), ft.DataCell(ft.Text(str(d['j']))), ft.DataCell(ft.Text(str(d['s']))), ft.DataCell(ft.Text(f"{d['faltas']}", color=c, weight="bold")), ft.DataCell(ft.Text(f"{d['pct']}%", color=c))]))
             dt = ft.DataTable(columns=[ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), ft.DataColumn(ft.Text("F"), numeric=True), ft.DataColumn(ft.Text("%"), numeric=True)], rows=rows, bgcolor="white", border_radius=10, column_spacing=15)
-            cont.controls = [ft.Row([dt], scroll="always")]; page.update()
+            table_cont.controls = [ft.Row([dt], scroll="always")]; page.update()
         def export(e):
             if not pd: return show_snack("Falta pandas", "red")
             data = get_report_data(state["curso_id"], d1.value, d2.value)
@@ -517,7 +517,7 @@ def main(page: ft.Page):
             df = pd.DataFrame(data).rename(columns={'nombre':'Alumno', 'p':'Pres', 't':'Tarde', 'a':'Aus', 'j':'Just', 's':'Susp', 'faltas':'Total', 'pct':'%'})
             output = io.BytesIO(); df.to_excel(output, index=False, engine='xlsxwriter'); b64 = base64.b64encode(output.getvalue()).decode()
             page.launch_url(f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}", web_window_name="reporte.xlsx")
-        return ft.View("/reportes", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Reportes"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([d1, d2, ft.ElevatedButton("Ver", on_click=gen)]), ft.ElevatedButton("Excel", icon="download", on_click=export, bgcolor="green", color="white"), ft.Divider(), cont]), padding=15, bgcolor="#f0f2f5", expand=True)])
+        return ft.View("/reportes", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Reportes"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([d1, d2, ft.ElevatedButton("Ver", on_click=gen)]), ft.ElevatedButton("Excel", icon="download", on_click=export, bgcolor="green", color="white"), ft.Divider(), table_cont]), padding=15, bgcolor="#f0f2f5", expand=True)])
 
     # --- OTRAS VISTAS ---
     def search_view():
@@ -532,7 +532,7 @@ def main(page: ft.Page):
         if not s: return ft.View("/error", [ft.Text("Error")])
         req_col = ft.Column()
         for r in get_student_req_status(aid, s['curso_id']): req_col.controls.append(ft.Row([ft.Icon("check" if r['ok'] else "close", color="green" if r['ok'] else "red"), ft.Text(r['desc'])]))
-        card = ft.Container(content=ft.Column([ft.Text(s['nombre'], size=24, weight="bold"), ft.Text(f"Curso: {s['curso_nombre']}"), ft.Text(f"DNI: {s.get('dni','-')}"), ft.Divider(), ft.Text("Tutor:", weight="bold"), ft.Text(f"{s.get('tutor_nombre','-')} ({s.get('tutor_telefono','-')})"), ft.Divider(), ft.Text("Obs:", weight="bold"), ft.Text(s.get('observaciones','-'), italic=True), ft.Divider(), ft.Text("Papeles:", weight="bold"), req_col]), padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=5, color="black12"))
+        card = ft.Container(content=ft.Column([ft.Text(s['nombre'], size=24, weight="bold"), ft.Text(f"Curso: {s['curso_nombre']}"), ft.Text(f"DNI: {s.get('dni','-')}"), ft.Divider(), ft.Text("Tutor:", weight="bold"), ft.Text(f"{s.get('tutor_nombre','-')} ({s.get('tutor_telefono','-')})"), ft.Divider(), ft.Text("Obs:", weight="bold"), ft.Text(s.get('observaciones','-'), italic=True), ft.Divider(), ft.Text("Papeles:", weight="bold"), req_col]), padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=5, color="black"))
         return ft.View("/student_detail", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/search")), title=ft.Text("Ficha"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([card], scroll="auto"), padding=20, bgcolor="#f0f2f5", expand=True)])
 
     def form_student_view():
@@ -562,7 +562,8 @@ def main(page: ft.Page):
             if rs: dd.value = rs[0]['descripcion']
             page.update(); lc()
         def lc():
-            col.controls.clear(); if not dd.value: return
+            col.controls.clear()
+            if not dd.value: return
             rid = rm[dd.value]; done = get_cumplimientos(rid)
             for a in get_alumnos(state["curso_id"]): col.controls.append(ft.Container(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: toggle_cumplimiento(rid, aid, e.control.value)), bgcolor="white", padding=5, border_radius=5, margin=2))
             page.update()
@@ -607,7 +608,7 @@ def main(page: ft.Page):
         return ft.View("/users", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Usuarios"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([u, p, r, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
 
     # --- ROUTER ---
-    def route_change(route):
+    def router(route):
         page.views.clear()
         views = {
             "/": login_view, "/dashboard": dashboard_view, "/curso": curso_view, "/asistencia": asistencia_view,
@@ -619,10 +620,18 @@ def main(page: ft.Page):
         else: page.views.append(login_view())
         page.update()
 
-    page.on_route_change = route_change
+    page.on_route_change = router
     page.on_view_pop = lambda view: page.go(page.views[-2].route)
     page.go("/")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    ft.app(target=main, view=ft.WEB_BROWSER, port=port, host="0.0.0.0", web_renderer="html")
+    # Detección de entorno: Si hay PORT, es Nube. Si no, es Local.
+    port_env = os.environ.get("PORT")
+    
+    if port_env:
+        # MODO NUBE (Render/Railway): Escuchar en 0.0.0.0
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
+    else:
+        # MODO LOCAL (Tu PC): Escuchar en localhost (127.0.0.1)
+        # Esto permite que Windows abra el navegador correctamente
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8000, web_renderer="html")
