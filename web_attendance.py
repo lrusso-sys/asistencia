@@ -7,22 +7,22 @@ import json
 import base64
 import io
 
-# --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS CON MANEJO DE ERRORES ---
+# --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS ---
 try:
     import pandas as pd
 except ImportError:
     pd = None
-    print("⚠️ ADVERTENCIA: 'pandas' no está instalado.")
+    print("⚠️ Pandas no instalado.")
 
 try:
     import openpyxl
 except ImportError:
-    print("⚠️ ADVERTENCIA: 'openpyxl' no está instalado.")
+    print("⚠️ Openpyxl no instalado.")
 
 try:
     import xlsxwriter
 except ImportError:
-    print("⚠️ ADVERTENCIA: 'xlsxwriter' no está instalado.")
+    print("⚠️ XlsxWriter no instalado.")
 
 try:
     import firebase_admin
@@ -30,10 +30,10 @@ try:
 except ImportError:
     firebase_admin = None
     firestore = None
-    print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado. Se usará SQLite localmente.")
+    print("ℹ️ Modo Local: Usando SQLite.")
 
 # ======================================================================
-# 1. LÓGICA DE BASE DE DATOS (Híbrido: Firestore Cloud / SQLite Local)
+# 1. LÓGICA DE BASE DE DATOS
 # ======================================================================
 
 DB_NAME = 'asistencia_alumnos.db'
@@ -47,10 +47,8 @@ def get_sqlite_conn():
     return conn
 
 def init_backend():
-    # 1. Inicializar SQLite siempre como respaldo
-    init_sqlite_db()
-
-    # 2. Intentar Inicializar Firestore
+    init_sqlite_db() # Base local siempre lista
+    
     global db_firestore, app_id
     firebase_config_str = os.environ.get('__firebase_config', None)
     app_id = os.environ.get('__app_id', 'local-dev')
@@ -62,7 +60,7 @@ def init_backend():
                 cred = credentials.Certificate(cred_dict) if "private_key" in cred_dict else credentials.ApplicationDefault()
                 firebase_admin.initialize_app(cred)
             db_firestore = firestore.client()
-            print(f"✅ MODO NUBE: Conectado a Firestore ({app_id})")
+            print(f"✅ MODO NUBE: Conectado a Firestore")
             return True
         except Exception as e:
             print(f"⚠️ Error Firestore: {e}. Usando SQLite.")
@@ -81,7 +79,7 @@ def init_sqlite_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
     
-    # Migraciones simples
+    # Migraciones
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
@@ -116,8 +114,7 @@ def authenticate_user(username, password):
         try:
             q = get_col('Usuarios').where('username', '==', username).limit(1).stream()
             doc = next(q, None)
-            if doc and doc.to_dict().get('password') == pwd:
-                return (True, doc.to_dict().get('role'))
+            if doc and doc.to_dict().get('password') == pwd: return (True, doc.to_dict().get('role'))
             if not doc and username=="admin" and password=="admin":
                  if not next(get_col('Usuarios').limit(1).stream(), None):
                      add_user("admin", "admin", "admin")
@@ -406,7 +403,7 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet - Strings only)
+# 2. INTERFAZ GRÁFICA (Flet) - Universal (Sin ft.colors)
 # ======================================================================
 
 def main(page: ft.Page):
@@ -422,6 +419,7 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
+    # --- VISTAS ---
     def login_view():
         user = ft.TextField(label="Usuario", width=300, bgcolor="white")
         pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white")
@@ -436,13 +434,14 @@ def main(page: ft.Page):
             ft.Container(content=ft.Column([
                 logo, ft.Text("Sistema de Asistencia", size=24, weight="bold"),
                 ft.Text("UNSAM", size=16, color="grey"), ft.Divider(height=20, color="transparent"),
-                user, pwd, ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white")
+                user, pwd, ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white"),
+                ft.Text("Admin Default: admin/admin", size=12, color="grey")
             ], horizontal_alignment="center"), alignment=ft.alignment.center, expand=True, bgcolor="#f0f2f5")])
 
     def dashboard_view():
         ciclo = get_ciclo_activo()
-        c_nombre = ciclo['nombre'] if ciclo else "Sin Ciclo"
-        search = ft.TextField(hint_text="Buscar...", expand=True, bgcolor="white")
+        c_nombre = ciclo['nombre'] if ciclo else "Sin Ciclo Activo"
+        search = ft.TextField(hint_text="Buscar alumno...", expand=True, bgcolor="white")
         def do_search(e): 
             if search.value: state["search"]=search.value; page.go("/search")
         
@@ -625,13 +624,14 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
-    # Detección de entorno: Si hay PORT, es Nube. Si no, es Local.
+    # CONFIGURACIÓN DE ARRANQUE PARA NUBE Y LOCAL
     port_env = os.environ.get("PORT")
     
     if port_env:
-        # MODO NUBE (Render/Railway): Escuchar en 0.0.0.0
+        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
+        print(f"🚀 Iniciando en NUBE (Puerto {port_env})")
         ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # MODO LOCAL (Tu PC): Escuchar en localhost (127.0.0.1)
-        # Esto permite que Windows abra el navegador correctamente
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8000, web_renderer="html")
+        # LOCAL: Automático (Flet elige puerto libre y abre navegador)
+        print("🏠 Iniciando en LOCAL")
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER)
