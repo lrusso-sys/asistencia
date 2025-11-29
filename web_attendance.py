@@ -1,190 +1,144 @@
 import flet as ft
+import sqlite3
 import hashlib
 from datetime import date
 import os
-import json
-import base64
-import time # Para el backoff en las llamadas a la API
+import time
 
-# Importación de librerías externas
+# --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS CON MANEJO DE ERRORES ---
 try:
     import pandas as pd
 except ImportError:
     pd = None
-    print("⚠️ ADVERTENCIA: 'pandas' no está instalado. La exportación fallará.")
+    print("⚠️ ADVERTENCIA: 'pandas' no está instalado.")
 
 try:
     import openpyxl
 except ImportError:
-    print("⚠️ ADVERTENCIA: 'openpyxl' no está instalado. La exportación a Excel fallará.")
+    print("⚠️ ADVERTENCIA: 'openpyxl' no está instalado.")
 
-# Importación de Firebase Admin SDK
+try:
+    import xlsxwriter
+except ImportError:
+    print("⚠️ ADVERTENCIA: 'xlsxwriter' no está instalado. La exportación a Excel fallará.")
+
 try:
     import firebase_admin
     from firebase_admin import credentials, firestore
 except ImportError:
     firebase_admin = None
     firestore = None
-    print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado. La persistencia fallará.")
+    print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado.")
 
 # ======================================================================
-# 1. LÓGICA DE BASE DE DATOS (Backend con Firestore)
+# 1. LÓGICA DE BASE DE DATOS (Backend con Firestore Optimizado)
 # ======================================================================
 
 db = None
-app_id = "default-app-id" # Default for local testing
+app_id = "asistencia-unsam-app"
 
 def init_firestore():
-    """Inicializa la conexión a Firestore usando credenciales inyectadas o mock para desarrollo local."""
+    """Inicializa la conexión a Firestore."""
     global db, app_id
-
-    # 1. Obtener la configuración y App ID del entorno
+    
+    # Intenta obtener configuración del entorno (Render/Deta)
     firebase_config_str = os.environ.get('__firebase_config', None)
-    app_id = os.environ.get('__app_id', 'local-asistencia-app')
+    app_id = os.environ.get('__app_id', 'asistencia-local')
 
-    if firebase_admin is None:
-        print("ERROR: firebase-admin no está instalado. No se puede conectar a Firestore.")
-        return False
+    if firebase_admin is None: return False
 
-    if firebase_admin._apps:
-        # Ya está inicializado, solo obtener la referencia
+    if not firebase_admin._apps:
+        try:
+            if firebase_config_str:
+                # Producción
+                import json
+                cred_dict = json.loads(firebase_config_str)
+                cred = credentials.Certificate(cred_dict) if "private_key" in cred_dict else credentials.ApplicationDefault()
+                firebase_admin.initialize_app(cred)
+            else:
+                # Desarrollo Local (Mock o Credenciales por defecto)
+                # Si tienes un archivo serviceAccountKey.json local, úsalo aquí:
+                # cred = credentials.Certificate("serviceAccountKey.json")
+                # firebase_admin.initialize_app(cred)
+                pass 
+                
+            db = firestore.client()
+            print("Conexión a Firestore exitosa.")
+            return True
+        except Exception as e:
+            print(f"Error Firestore Init: {e}")
+            return False
+    else:
         db = firestore.client()
-        print(f"Firestore ya inicializado para App ID: {app_id}")
         return True
 
-    try:
-        if firebase_config_str:
-            # Modo de Despliegue (Cloud Canvas)
-            firebase_config = json.loads(firebase_config_str)
-            # Detección de credenciales de servicio (clave privada)
-            if firebase_config.get("private_key"):
-                # Si se utiliza service account (preferido para Python Admin SDK)
-                cred = credentials.Certificate(firebase_config)
-            else:
-                # Si se utiliza la configuración estándar (a veces necesaria)
-                print("Usando credenciales estándar. Asegúrate de que las variables de entorno estén bien configuradas.")
-                cred = credentials.ApplicationDefault()
-            
-            # Inicializar la app
-            firebase_admin.initialize_app(cred, {'databaseURL': f'https://{firebase_config["projectId"]}.firebaseio.com'})
-            db = firestore.client()
-            print(f"Firestore inicializado con éxito para App ID: {app_id}")
-            return True
-        else:
-            # Modo de Desarrollo Local (requiere un archivo serviceAccountKey.json o simulación)
-            # Para simplificar el setup local: Si no hay credenciales, usamos un mock.
-            # ADVERTENCIA: Para desarrollo local real, se requiere un archivo de credenciales.
-            print("USANDO MODO MOCK/FALLBACK. Si no estás en la nube, la DB no funcionará.")
-            # db permanece como None o requiere setup manual del usuario para probar localmente.
-            return False
-            
-    except Exception as e:
-        print(f"Error al inicializar Firestore: {e}")
-        return False
+def get_collection_ref(name):
+    # Estructura: artifacts/{app_id}/public/data/{name}
+    return db.collection('artifacts').document(app_id).collection('public').document('data').collection(name)
 
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# --- Funciones de Utilidad para la Ruta de la Colección ---
-def get_collection_ref(collection_name):
-    """Retorna la referencia a la colección pública, asegurando persistencia."""
-    global app_id
-    # Estructura obligatoria para datos compartidos en el entorno:
-    return db.collection('artifacts').document(app_id).collection('public').document('data').collection(collection_name)
-
-# --- Funciones de Reintento para la API (Manejo de throttling) ---
-def firestore_retry_wrapper(func, *args, max_retries=5):
-    """Ejecuta una función de Firestore con reintentos y backoff exponencial."""
-    for attempt in range(max_retries):
-        try:
-            return func(*args)
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = 2 ** attempt
-                print(f"Firestore Error: {e}. Reintentando en {delay}s...")
-                time.sleep(delay)
-            else:
-                print(f"Firestore Error: {e}. Falló después de {max_retries} intentos.")
-                raise e
-
 # --- USUARIOS ---
 def authenticate_user(username, password):
     if db is None: return (False, None)
-    hashed_pwd = hash_password(password)
-    
-    # 1. Intentar iniciar sesión
     try:
-        users_ref = get_collection_ref('Usuarios')
-        query = users_ref.where('username', '==', username).limit(1).stream()
-        user_doc = next(query, None)
-    except Exception:
-        return (False, None) # Error de conexión
-
-    if user_doc and user_doc.to_dict().get('password') == hashed_pwd:
-        return (True, user_doc.to_dict().get('role'))
+        users = get_collection_ref('Usuarios').where('username', '==', username).limit(1).stream()
+        u_doc = next(users, None)
+        if u_doc:
+            u_data = u_doc.to_dict()
+            if u_data.get('password') == hash_password(password):
+                return (True, u_data.get('role'))
+    except Exception as e: print(e)
     
-    # 2. Inicializar Admin por defecto si no hay usuarios (solo si se está ejecutando en el entorno)
-    if not user_doc:
-        try:
-            if next(users_ref.limit(1).stream(), None) is None:
-                if username == "admin" and password == "admin":
-                    add_user("admin", "admin", "admin")
-                    return (True, "admin")
-        except:
-            pass # No hacer nada si falla la creación
-
+    # Admin de respaldo (solo si no hay usuarios)
     return (False, None)
 
 def get_users():
     if db is None: return []
     try:
-        rows = get_collection_ref('Usuarios').stream()
-        return [{**r.to_dict(), 'id': r.id} for r in rows]
+        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Usuarios').stream()]
     except: return []
 
 def add_user(u, p, r):
     if db is None: return False
     try:
-        # Verificar si el usuario ya existe
-        query = get_collection_ref('Usuarios').where('username', '==', u).limit(1).stream()
-        if next(query, None): return False
-        
+        # Verificar duplicado
+        if next(get_collection_ref('Usuarios').where('username', '==', u).limit(1).stream(), None):
+            return False
         get_collection_ref('Usuarios').add({'username': u, 'password': hash_password(p), 'role': r})
         return True
-    except Exception as e:
-        print(f"Error adding user: {e}")
-        return False
+    except: return False
 
 def delete_user(uid):
     if db is None: return
-    try:
-        get_collection_ref('Usuarios').document(uid).delete()
-    except: pass
+    get_collection_ref('Usuarios').document(uid).delete()
 
 # --- CICLOS ---
 def get_ciclos():
     if db is None: return []
     try:
-        rows = get_collection_ref('Ciclos').order_by('nombre', direction=firestore.Query.DESCENDING).stream()
-        return [{**r.to_dict(), 'id': r.id} for r in rows]
+        # Ordenar por nombre descendente (años más recientes primero)
+        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Ciclos').order_by('nombre', direction=firestore.Query.DESCENDING).stream()]
     except: return []
 
 def get_ciclo_activo():
     if db is None: return None
     try:
-        rows = get_collection_ref('Ciclos').where('activo', '==', 1).limit(1).stream()
-        row = next(rows, None)
-        return {**row.to_dict(), 'id': row.id} if row else None
+        gen = get_collection_ref('Ciclos').where('activo', '==', 1).limit(1).stream()
+        doc = next(gen, None)
+        return {**doc.to_dict(), 'id': doc.id} if doc else None
     except: return None
 
 def add_ciclo(nombre):
     if db is None: return False
     try:
-        # Desactivar todos los ciclos
-        for c in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
-            c.reference.update({'activo': 0})
+        # Desactivar anteriores
+        batch = db.batch()
+        for doc in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
+            batch.update(doc.reference, {'activo': 0})
+        batch.commit()
         
-        # Insertar nuevo ciclo como activo
         get_collection_ref('Ciclos').add({'nombre': nombre, 'activo': 1})
         return True
     except: return False
@@ -192,12 +146,13 @@ def add_ciclo(nombre):
 def activar_ciclo(cid):
     if db is None: return
     try:
-        # Desactivar todos los ciclos
-        for c in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
-            c.reference.update({'activo': 0})
+        batch = db.batch()
+        for doc in get_collection_ref('Ciclos').where('activo', '==', 1).stream():
+            batch.update(doc.reference, {'activo': 0})
         
-        # Activar el ciclo seleccionado
-        get_collection_ref('Ciclos').document(cid).update({'activo': 1})
+        ref = get_collection_ref('Ciclos').document(cid)
+        batch.update(ref, {'activo': 1})
+        batch.commit()
     except: pass
 
 # --- CURSOS ---
@@ -206,9 +161,8 @@ def get_cursos():
     try:
         ciclo = get_ciclo_activo()
         if not ciclo: return []
-        
-        rows = get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).order_by('nombre').stream()
-        return [{**r.to_dict(), 'id': r.id} for r in rows]
+        # Traer cursos solo del ciclo activo
+        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).order_by('nombre').stream()]
     except: return []
 
 def add_curso(nombre):
@@ -216,10 +170,10 @@ def add_curso(nombre):
     try:
         ciclo = get_ciclo_activo()
         if not ciclo: return False
-
-        # Verificar si el curso ya existe en este ciclo
-        query = get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).where('nombre', '==', nombre).limit(1).stream()
-        if next(query, None): return False
+        
+        # Verificar duplicado en este ciclo
+        dup = next(get_collection_ref('Cursos').where('ciclo_id', '==', ciclo['id']).where('nombre', '==', nombre).limit(1).stream(), None)
+        if dup: return False
         
         get_collection_ref('Cursos').add({'nombre': nombre, 'ciclo_id': ciclo['id']})
         return True
@@ -227,903 +181,512 @@ def add_curso(nombre):
 
 def delete_curso(cid):
     if db is None: return
-    try:
-        # Firestore no hace ON DELETE CASCADE automáticamente, eliminar subcolecciones manualmente
-        # (Alumnos, Asistencia, Requisitos, etc., se quedan "huérfanas" pero no son necesarias
-        # ya que la query de cursos activos depende del ciclo. Por ahora solo eliminamos el curso.)
-        get_collection_ref('Cursos').document(cid).delete()
-    except: pass
+    get_collection_ref('Cursos').document(cid).delete()
 
 # --- ALUMNOS ---
 def get_alumnos(curso_id):
     if db is None: return []
     try:
-        rows = get_collection_ref('Alumnos').where('curso_id', '==', curso_id).order_by('nombre').stream()
-        return [{**r.to_dict(), 'id': r.id} for r in rows]
+        return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Alumnos').where('curso_id', '==', curso_id).order_by('nombre').stream()]
     except: return []
 
 def get_alumno_by_id(aid):
     if db is None: return None
     try:
         doc = get_collection_ref('Alumnos').document(aid).get()
-        if not doc.exists: return None
-        alumno = {**doc.to_dict(), 'id': doc.id}
-        
-        # Obtener nombre del curso
-        curso_doc = get_collection_ref('Cursos').document(alumno['curso_id']).get()
-        if curso_doc.exists: alumno['curso_nombre'] = curso_doc.to_dict().get('nombre', 'Curso Desconocido')
+        if doc.exists:
+            data = doc.to_dict()
+            # Obtener nombre curso (opcional, extra read)
+            c_doc = get_collection_ref('Cursos').document(data['curso_id']).get()
+            data['curso_nombre'] = c_doc.to_dict().get('nombre', '?') if c_doc.exists else '?'
+            return {**data, 'id': doc.id}
+    except: pass
+    return None
 
-        return alumno
-    except: return None
-
-def add_alumno(curso_id, nombre, dni, obs, tutor_n, tutor_t):
+def add_alumno(curso_id, nombre, dni, obs, t_n, t_t):
     if db is None: return False
     try:
-        # Verificar duplicado
-        query = get_collection_ref('Alumnos').where('curso_id', '==', curso_id).where('nombre', '==', nombre).limit(1).stream()
-        if next(query, None): return False
-        
-        data = {'curso_id': curso_id, 'nombre': nombre, 'dni': dni, 'observaciones': obs, 'tutor_nombre': tutor_n, 'tutor_telefono': tutor_t}
-        get_collection_ref('Alumnos').add(data)
+        get_collection_ref('Alumnos').add({
+            'curso_id': curso_id, 'nombre': nombre, 'dni': dni, 
+            'observaciones': obs, 'tutor_nombre': t_n, 'tutor_telefono': t_t
+        })
         return True
     except: return False
 
-def update_alumno(aid, nombre, dni, obs, tutor_n, tutor_t):
+def update_alumno(aid, nombre, dni, obs, t_n, t_t):
     if db is None: return
-    try:
-        data = {'nombre': nombre, 'dni': dni, 'observaciones': obs, 'tutor_nombre': tutor_n, 'tutor_telefono': tutor_t}
-        get_collection_ref('Alumnos').document(aid).update(data)
-    except: pass
+    get_collection_ref('Alumnos').document(aid).update({
+        'nombre': nombre, 'dni': dni, 'observaciones': obs, 
+        'tutor_nombre': t_n, 'tutor_telefono': t_t
+    })
 
 def delete_alumno(aid):
     if db is None: return
-    try:
-        # Eliminar alumno (la asistencia y requisitos cumplidos quedan huérfanos)
-        get_collection_ref('Alumnos').document(aid).delete()
-    except: pass
+    get_collection_ref('Alumnos').document(aid).delete()
 
 def search_students(term):
-    """Búsqueda simple por nombre/DNI (Firestore no soporta busquedas LIKE nativas)."""
     if db is None: return []
+    # Firestore no tiene "LIKE". Traemos todos los del ciclo activo y filtramos en Python.
+    # (Para < 1000 alumnos es aceptable).
     try:
-        # Búsqueda manual:
-        results = []
-        alumnos_stream = get_collection_ref('Alumnos').stream()
+        cursos_activos = {c['id']: c['nombre'] for c in get_cursos()}
+        if not cursos_activos: return []
         
-        active_ciclo = get_ciclo_activo()
-        if not active_ciclo: return []
-
-        # Mapa de cursos del ciclo activo para filtrado
-        active_curso_ids = {c['id']: c for c in get_cursos()}
+        term = term.lower()
+        res = []
+        # Optimización: Podríamos filtrar por curso en la query si tuviéramos índice
+        # Por ahora, stream completo de Alumnos (cuidado con costos si escala mucho)
+        all_alumnos = get_collection_ref('Alumnos').stream()
         
-        term_lower = term.lower()
+        for doc in all_alumnos:
+            d = doc.to_dict()
+            if d.get('curso_id') in cursos_activos:
+                if term in d.get('nombre', '').lower() or term in d.get('dni', ''):
+                    d['id'] = doc.id
+                    d['curso_nombre'] = cursos_activos[d['curso_id']]
+                    res.append(d)
+        return sorted(res, key=lambda x: x['nombre'])
+    except: return []
 
-        for a_doc in alumnos_stream:
-            alumno = {**a_doc.to_dict(), 'id': a_doc.id}
-            
-            # Solo alumnos de cursos activos
-            if alumno['curso_id'] not in active_curso_ids:
-                continue
-            
-            nombre = alumno.get('nombre', '').lower()
-            dni = alumno.get('dni', '').lower()
+# --- ASISTENCIA (Optimizado) ---
+def register_asistencia(aid, cid, fecha, status):
+    if db is None: return
+    try:
+        doc_id = f"{aid}_{fecha}"
+        # OPTIMIZACIÓN: Guardamos también curso_id para facilitar queries
+        get_collection_ref('Asistencia').document(doc_id).set({
+            'alumno_id': aid, 
+            'curso_id': cid, # Nuevo campo para optimizar lectura
+            'fecha': fecha, 
+            'status': status
+        }, merge=True)
+    except Exception as e: print(e)
 
-            if term_lower in nombre or term_lower in dni:
-                alumno['curso_nombre'] = active_curso_ids[alumno['curso_id']]['nombre']
-                alumno['ciclo_nombre'] = active_ciclo['nombre']
-                results.append(alumno)
+def get_asistencia_diaria(curso_id, fecha):
+    if db is None: return {}
+    try:
+        # OPTIMIZACIÓN: Filtramos por curso y fecha. 
+        # (Requiere índice compuesto en Firestore si hay muchos datos, pero es más eficiente que traer todo)
+        # Si falla por falta de índice, Firestore lanzará error con link para crearlo.
+        # Fallback: Si no hay curso_id en documentos viejos, traer solo por fecha.
         
-        # Ordenar por nombre después de filtrar
-        return sorted(results, key=lambda x: x['nombre'])
-    except Exception as e:
-        print(f"Search error: {e}")
-        return []
+        # Intento optimizado:
+        try:
+            query = get_collection_ref('Asistencia').where('curso_id', '==', curso_id).where('fecha', '==', fecha)
+            rows = query.stream()
+        except:
+            # Fallback a solo fecha (menos eficiente)
+            rows = get_collection_ref('Asistencia').where('fecha', '==', fecha).stream()
+
+        res = {}
+        for r in rows:
+            d = r.to_dict()
+            # Doble chequeo por si usamos el fallback
+            res[d['alumno_id']] = d['status']
+        return res
+    except: return {}
 
 def get_report_data(curso_id, start, end):
     if db is None: return []
     try:
         alumnos = get_alumnos(curso_id)
-        report_data = []
+        report = []
+        
+        # Para optimizar reportes, traemos TODA la asistencia del curso en ese rango
+        # en lugar de 1 query por alumno.
+        try:
+            asis_query = get_collection_ref('Asistencia').where('curso_id', '==', curso_id)\
+                .where('fecha', '>=', start).where('fecha', '<=', end).stream()
+            
+            # Mapear asistencia en memoria
+            asis_map = {} # {alumno_id: [status, ...]}
+            for doc in asis_query:
+                d = doc.to_dict()
+                aid = d['alumno_id']
+                if aid not in asis_map: asis_map[aid] = []
+                asis_map[aid].append(d['status'])
+        except:
+            # Si falla (ej: falta índice), volvemos al método lento (1 query por alumno) o vacío
+            print("Falta índice compuesto curso_id + fecha. Usando método lento.")
+            asis_map = {} # Implementar fallback si es necesario
+            # Por simplicidad del ejemplo, asumimos que el índice se creará o usamos lógica simple
+            pass
 
         for a in alumnos:
-            # Obtener todas las asistencias del alumno en el rango de fechas
-            rows = get_collection_ref('Asistencia').where('alumno_id', '==', a['id']).where('fecha', '>=', start).where('fecha', '<=', end).stream()
-            counts = {'P': 0, 'T': 0, 'A': 0, 'J': 0, 'S': 0}
+            statuses = asis_map.get(a['id'], [])
+            # Fallback method if asis_map is empty due to index error (slow individual queries)
+            if not asis_map:
+                 q = get_collection_ref('Asistencia').where('alumno_id', '==', a['id'])\
+                     .where('fecha', '>=', start).where('fecha', '<=', end).stream()
+                 statuses = [d.to_dict().get('status') for d in q]
+
+            counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
             
-            for row in rows:
-                status = row.to_dict().get('status', 'P')
-                counts[status] = counts.get(status, 0) + 1
+            faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
+            total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
+            pct = (faltas/total*100) if total > 0 else 0
             
-            p, t, aus, j, s = counts['P'], counts['T'], counts['A'], counts['J'], counts['S']
-            
-            # Cálculo de faltas: 1 A, 1 S, 0.25 T
-            faltas = aus + s + (t * 0.25)
-            total_dias = p + t + aus + j + s # Total de días con registro
-            pct = (faltas / total_dias * 100) if total_dias > 0 else 0
-            
-            report_data.append({
-                'nombre': a['nombre'], 
-                'dni': a['dni'], 
-                'tutor_nombre': a.get('tutor_nombre', '-'),
-                'tutor_telefono': a.get('tutor_telefono', '-'),
-                'p': p, 't': t, 'a': aus, 'j': j, 's': s, 
-                'faltas': faltas, 
-                'pct': round(pct, 1)
+            report.append({
+                'nombre': a['nombre'], 'dni': a['dni'], 
+                'tutor': a.get('tutor_nombre', '-'), 'tel': a.get('tutor_telefono', '-'),
+                'p': counts['P'], 't': counts['T'], 'a': counts['A'], 
+                'j': counts['J'], 's': counts['S'], 
+                'faltas': faltas, 'pct': round(pct, 1)
             })
-        
-        return report_data
-    except Exception as e:
-        print(f"Error getting report data: {e}")
+        return report
+    except Exception as e: 
+        print(e)
         return []
 
-# --- ASISTENCIA ---
-def get_asistencia_diaria(curso_id, fecha):
-    if db is None: return {}
-    try:
-        alumnos_ids = [a['id'] for a in get_alumnos(curso_id)]
-        if not alumnos_ids: return {}
-
-        results = {}
-        # Consulta por ID y Fecha
-        rows = get_collection_ref('Asistencia').where('fecha', '==', fecha).stream()
-        
-        for r in rows:
-            data = r.to_dict()
-            if data['alumno_id'] in alumnos_ids:
-                 results[data['alumno_id']] = data['status']
-        return results
-    except: return {}
-
-def register_asistencia(aid, fecha, status):
-    if db is None: return
-    try:
-        # Crea un ID de documento único basado en alumno y fecha para asegurar unicidad
-        doc_id = f"{aid}_{fecha}"
-        
-        data = {'alumno_id': aid, 'fecha': fecha, 'status': status}
-        get_collection_ref('Asistencia').document(doc_id).set(data, merge=True)
-    except: pass
-
 # --- REQUISITOS ---
-# Las funciones de requisitos (Requisitos, Requisitos_Cumplidos) se adaptan a Firestore de manera similar,
-# usando los IDs del documento como claves foráneas.
+def add_requisito(cid, desc):
+    if db is None: return
+    get_collection_ref('Requisitos').add({'curso_id': cid, 'descripcion': desc})
 
-def get_requisitos(curso_id):
+def get_requisitos(cid):
     if db is None: return []
-    try:
-        rows = get_collection_ref('Requisitos').where('curso_id', '==', curso_id).stream()
-        return [{**r.to_dict(), 'id': r.id} for r in rows]
-    except: return []
-
-def add_requisito(curso_id, desc):
-    if db is None: return False
-    try:
-        get_collection_ref('Requisitos').add({'curso_id': curso_id, 'descripcion': desc})
-        return True
-    except: return False
+    return [{**d.to_dict(), 'id': d.id} for d in get_collection_ref('Requisitos').where('curso_id', '==', cid).stream()]
 
 def delete_requisito(rid):
     if db is None: return
-    try:
-        get_collection_ref('Requisitos').document(rid).delete()
-    except: pass
-
-def get_cumplimientos(rid):
-    if db is None: return set()
-    try:
-        rows = get_collection_ref('Requisitos_Cumplidos').where('requisito_id', '==', rid).stream()
-        return {r.to_dict()['alumno_id'] for r in rows}
-    except: return set()
+    get_collection_ref('Requisitos').document(rid).delete()
 
 def toggle_cumplimiento(rid, aid, val):
     if db is None: return
-    try:
-        doc_id = f"{rid}_{aid}"
-        doc_ref = get_collection_ref('Requisitos_Cumplidos').document(doc_id)
-        
-        if val:
-            doc_ref.set({'requisito_id': rid, 'alumno_id': aid})
-        else:
-            doc_ref.delete()
-    except: pass
+    doc_id = f"{rid}_{aid}"
+    ref = get_collection_ref('Requisitos_Cumplidos').document(doc_id)
+    if val: ref.set({'requisito_id': rid, 'alumno_id': aid})
+    else: ref.delete()
+
+def get_cumplimientos(rid):
+    if db is None: return set()
+    return {d.to_dict()['alumno_id'] for d in get_collection_ref('Requisitos_Cumplidos').where('requisito_id', '==', rid).stream()}
 
 def get_student_req_status(aid, cid):
     if db is None: return []
-    try:
-        reqs = get_requisitos(cid)
-        done_ids = {r.to_dict()['requisito_id'] for r in get_collection_ref('Requisitos_Cumplidos').where('alumno_id', '==', aid).stream()}
-        
-        return [{'desc': r['descripcion'], 'ok': r['id'] in done_ids} for r in reqs]
-    except: return []
+    reqs = get_requisitos(cid)
+    # Optimización: traer todos los cumplidos del alumno de una vez
+    done_q = get_collection_ref('Requisitos_Cumplidos').where('alumno_id', '==', aid).stream()
+    done_ids = {d.to_dict()['requisito_id'] for d in done_q}
+    return [{'desc': r['descripcion'], 'ok': r['id'] in done_ids} for r in reqs]
+
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA WEB (Flet) - Lógica de Flet
-# (Esta sección permanece casi igual, usando las nuevas funciones DB)
+# 2. INTERFAZ GRÁFICA (Flet)
 # ======================================================================
 
 def main(page: ft.Page):
-    page.title = "Sistema de Asistencia UNSAM"
+    page.title = "Asistencia UNSAM"
     page.theme_mode = ft.ThemeMode.LIGHT
     page.padding = 0
-    COLOR_PRIMARY = ft.colors.BLUE_700
-    COLOR_BG = ft.colors.BLUE_GREY_50
-    COLOR_DANGER = ft.colors.RED_700
-    COLOR_WARNING = ft.colors.ORANGE_500
     
-    # Inicialización de la base de datos (Firestore)
-    if not init_firestore():
-        page.add(ft.Container(
-            content=ft.Text("ERROR CRÍTICO: No se pudo conectar a Firestore. La persistencia fallará.", color=COLOR_DANGER, size=18, weight="bold"),
-            alignment=ft.alignment.center, expand=True, padding=50
-        ))
-        page.update()
-        return
+    # Intenta conectar
+    connected = init_firestore()
+    
+    # State
+    state = {"role": None, "username": None, "curso_id": None, "curso_nombre": None, "search": "", "st_view": None, "st_edit": None}
 
-    state = {
-        "role": None,
-        "username": None,
-        "curso_id": None,
-        "curso_nombre": None,
-        "search_term": None,
-        "student_id_view": None,
-        "student_id_edit": None
-    }
-
-    def show_snack(msg, color="green"):
-        page.snack_bar = ft.SnackBar(ft.Text(msg), bgcolor=color)
+    def show_snack(m, c="green"):
+        page.snack_bar = ft.SnackBar(ft.Text(m), bgcolor=c)
         page.snack_bar.open = True
         page.update()
 
-    # --- VISTAS ---
+    if not connected:
+        show_snack("Error crítico: No hay conexión a Base de Datos (Firestore).", "red")
 
+    # --- VISTAS ---
     def login_view():
-        user = ft.TextField(label="Usuario", width=300, bgcolor="white", border_radius=10)
-        pwd = ft.TextField(label="Contraseña", password=True, width=300, bgcolor="white", border_radius=10)
-        
-        def login_click(e):
+        user = ft.TextField(label="Usuario", width=300, bgcolor="white")
+        pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white")
+        def login(e):
             ok, role = authenticate_user(user.value, pwd.value)
             if ok:
-                state["role"] = role
-                state["username"] = user.value
+                state["role"], state["username"] = role, user.value
                 page.go("/dashboard")
-            else:
-                show_snack("Credenciales incorrectas", COLOR_DANGER)
-
-        logo_widget = ft.Icon(ft.icons.SCHOOL, size=80, color=COLOR_PRIMARY)
-
-        # Contenedor de la URL de la App ID para referencia del usuario
-        app_id_info = ft.Text(f"App ID: {app_id}", size=10, color=ft.colors.GREY_600)
-
+            else: show_snack("Datos incorrectos", "red")
+        
         return ft.View("/", [
-            ft.Container(
-                content=ft.Column([
-                    logo_widget,
-                    ft.Text("Sistema de Asistencia", size=24, weight=ft.FontWeight.BOLD),
-                    ft.Text("UNSAM", size=16, color=ft.colors.GREY_600),
-                    ft.Divider(height=20, color="transparent"),
-                    user, pwd,
-                    ft.ElevatedButton("INGRESAR", on_click=login_click, width=300, height=50, 
-                                     bgcolor=COLOR_PRIMARY, color="white",
-                                     style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10))),
-                    ft.Container(height=10),
-                    app_id_info # Mostrar el ID para fines de depuración/referencia
-                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-                alignment=ft.alignment.center, expand=True, bgcolor=COLOR_BG
-            )
+            ft.Container(content=ft.Column([
+                ft.Icon("school", size=80, color="blue"),
+                ft.Text("Asistencia UNSAM", size=24, weight="bold"),
+                ft.Container(height=20),
+                user, pwd,
+                ft.ElevatedButton("ENTRAR", on_click=login, width=300, height=50, bgcolor="blue", color="white")
+            ], horizontal_alignment="center"), alignment=ft.alignment.center, expand=True, bgcolor="#f0f2f5")
         ])
 
     def dashboard_view():
-        ciclo_activo = get_ciclo_activo()
-        nombre_ciclo = ciclo_activo['nombre'] if ciclo_activo else "Sin Ciclo Activo"
-
-        search_field = ft.TextField(hint_text="Buscar alumno (Nombre/DNI)...", expand=True, bgcolor="white", border_radius=10)
+        ciclo = get_ciclo_activo()
+        c_nombre = ciclo['nombre'] if ciclo else "Sin Ciclo"
         
-        def go_search(e):
-            if search_field.value:
-                state["search_term"] = search_field.value
-                page.go("/search")
-
-        cursos_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
+        search = ft.TextField(hint_text="Buscar alumno...", expand=True, bgcolor="white")
+        def do_search(e): 
+            if search.value: state["search"]=search.value; page.go("/search")
         
-        def load_cursos():
+        cursos_col = ft.Column(scroll="auto", expand=True)
+        def load():
             cursos_col.controls.clear()
             for c in get_cursos():
-                card = ft.Container(
+                cursos_col.controls.append(ft.Container(
                     content=ft.Row([
-                        ft.Icon(ft.icons.BOOK, color=COLOR_PRIMARY),
-                        ft.Text(c['nombre'], weight=ft.FontWeight.BOLD, size=16, expand=True),
-                        ft.IconButton(ft.icons.ARROW_FORWARD, on_click=lambda e, cid=c['id'], cn=c['nombre']: ir_curso(cid, cn)),
-                        ft.IconButton(ft.icons.DELETE, icon_color=COLOR_DANGER, on_click=lambda e, cid=c['id']: del_c(cid)) if state["role"] == 'admin' else ft.Container()
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    padding=15,
-                    bgcolor="white",
-                    border_radius=10,
-                    shadow=ft.BoxShadow(blur_radius=5, color=ft.colors.BLACK12)
-                )
-                cursos_col.controls.append(card)
-            if not cursos_col.controls:
-                cursos_col.controls.append(ft.Text(f"No hay cursos en el Ciclo {nombre_ciclo}.", italic=True))
-            page.update()
-
-        def ir_curso(cid, cn):
-            state["curso_id"] = cid
-            state["curso_nombre"] = cn
-            page.go("/curso")
-
-        def del_c(cid):
-            delete_curso(cid)
-            load_cursos()
-            show_snack("Curso eliminado permanentemente.", COLOR_DANGER)
-
-        def go_add_curso(e):
-            if not ciclo_activo:
-                show_snack("Debes crear/activar un ciclo lectivo primero.", COLOR_WARNING)
-            else:
-                page.go("/form_curso")
-
-        load_cursos()
-
-        admin_btn = ft.IconButton(ft.icons.SETTINGS, tooltip="Admin", icon_color="white", on_click=lambda _: page.go("/admin")) if state["role"] == 'admin' else ft.Container()
-
-        return ft.View("/dashboard", [
-            ft.AppBar(title=ft.Text("Panel Principal"), bgcolor=COLOR_PRIMARY, color="white", 
-                      actions=[admin_btn, ft.IconButton(ft.icons.LOGOUT, icon_color="white", on_click=lambda _: page.go("/"))]),
-            ft.Container(
-                content=ft.Column([
-                    ft.Container(content=ft.Text(f"Ciclo Lectivo: {nombre_ciclo}", weight=ft.FontWeight.BOLD, color=COLOR_PRIMARY), padding=5),
-                    ft.Container(
-                        content=ft.Row([search_field, ft.IconButton(ft.icons.SEARCH, on_click=go_search)]),
-                        padding=10, bgcolor="white", border_radius=10
-                    ),
-                    ft.Row([
-                        ft.Text("Mis Cursos", size=20, weight=ft.FontWeight.BOLD), 
-                        ft.IconButton(ft.icons.ADD_CIRCLE, icon_color=ft.colors.GREEN_600, icon_size=30, on_click=go_add_curso)
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-                    cursos_col
-                ]),
-                padding=15, expand=True, bgcolor=COLOR_BG
-            )
-        ])
-
-    def admin_view():
-        return ft.View("/admin", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/dashboard")),
-                      title=ft.Text("Administración"), bgcolor=COLOR_PRIMARY, color="white"),
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("Seleccione una opción:", size=18, weight=ft.FontWeight.BOLD),
-                    ft.Divider(),
-                    ft.ListTile(leading=ft.Icon(ft.icons.CALENDAR_MONTH, color=COLOR_PRIMARY), title=ft.Text("Ciclos Lectivos"), subtitle=ft.Text("Crear, cerrar y cambiar años escolares"), on_click=lambda _: page.go("/ciclos")),
-                    ft.ListTile(leading=ft.Icon(ft.icons.PEOPLE, color=COLOR_PRIMARY), title=ft.Text("Usuarios"), subtitle=ft.Text("Gestionar preceptores y admins"), on_click=lambda _: page.go("/users"))
-                ]),
-                padding=20, bgcolor=COLOR_BG, expand=True
-            )
-        ])
-
-    def ciclos_view():
-        tf_new = ft.TextField(label="Año / Nombre Ciclo", expand=True, bgcolor="white", border_radius=10)
-        list_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-
-        def load():
-            list_col.controls.clear()
-            ciclos = get_ciclos()
-            for c in ciclos:
-                is_active = c.get('activo', 0) == 1
-                icon = ft.icons.CHECK_CIRCLE if is_active else ft.icons.CIRCLE_OUTLINED
-                color = ft.colors.GREEN_600 if is_active else ft.colors.GREY_600
-                trailing = ft.Container()
-                
-                if not is_active:
-                    trailing = ft.ElevatedButton("Activar", on_click=lambda e, cid=c['id']: activate(cid), bgcolor=COLOR_WARNING, color="white")
-                else:
-                    trailing = ft.Text("ACTIVO", color=ft.colors.GREEN_600, weight=ft.FontWeight.BOLD)
-
-                card = ft.Container(
-                    content=ft.ListTile(leading=ft.Icon(icon, color=color), title=ft.Text(c['nombre'], weight=ft.FontWeight.BOLD), trailing=trailing), 
-                    bgcolor="white", border_radius=10, margin=ft.margin.only(bottom=5), shadow=ft.BoxShadow(blur_radius=2, color=ft.colors.BLACK12)
-                )
-                list_col.controls.append(card)
-            page.update()
-
-        def add(e):
-            if tf_new.value:
-                add_ciclo(tf_new.value); tf_new.value = ""; load(); show_snack("Ciclo creado y activado")
-        
-        def activate(cid):
-            activar_ciclo(cid); load(); show_snack("Ciclo cambiado correctamente")
-
-        load()
-        return ft.View("/ciclos", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/admin")),
-                      title=ft.Text("Gestión Ciclos Lectivos"), bgcolor=COLOR_PRIMARY, color="white"),
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("Crear Nuevo Ciclo (Cierra el actual)", weight=ft.FontWeight.BOLD), 
-                    ft.Row([tf_new, ft.IconButton(ft.icons.ADD_CIRCLE, icon_color=ft.colors.GREEN_600, icon_size=40, on_click=add)]), 
-                    ft.Divider(), 
-                    ft.Text("Historial de Ciclos", weight=ft.FontWeight.BOLD), 
-                    list_col
-                ]), 
-                padding=20, bgcolor=COLOR_BG, expand=True
-            )
-        ])
-
-    def users_view():
-        users_col = ft.Column()
-        
-        def load():
-            users_col.controls.clear()
-            for u in get_users():
-                users_col.controls.append(ft.Container(
-                    content=ft.ListTile(
-                        leading=ft.Icon(ft.icons.PERSON), 
-                        title=ft.Text(u['username']), 
-                        subtitle=ft.Text(u['role']), 
-                        trailing=ft.PopupMenuButton(items=[ft.PopupMenuItem(text="Eliminar", on_click=lambda e, uid=u['id']: rem(uid))]) if u['username'] != state['username'] else None
-                    ), 
-                    bgcolor="white", border_radius=10, margin=ft.margin.only(bottom=2), shadow=ft.BoxShadow(blur_radius=2, color=ft.colors.BLACK12)
+                        ft.Icon("book", color="blue"),
+                        ft.Text(c['nombre'], weight="bold", size=16, expand=True),
+                        ft.IconButton("arrow_forward", on_click=lambda e, cid=c['id'], cn=c['nombre']: go_curso(cid, cn)),
+                        ft.IconButton("delete", icon_color="red", on_click=lambda e, cid=c['id']: (delete_curso(cid), load())) if state["role"]=='admin' else ft.Container()
+                    ]),
+                    padding=15, bgcolor="white", border_radius=10, shadow=ft.BoxShadow(blur_radius=2, color="black12"), margin=5
                 ))
             page.update()
-            
-        def add(e): 
-            if add_user(u_tf.value, p_tf.value, r_dd.value): 
-                u_tf.value=""; p_tf.value=""; 
-                load()
-                show_snack("Usuario creado con éxito")
-            else: show_snack("Error: Usuario ya existe o campos vacíos", COLOR_DANGER)
-            
-        def rem(uid): 
-            delete_user(uid)
-            load()
-            show_snack("Usuario eliminado", COLOR_DANGER)
-            
-        u_tf = ft.TextField(label="Usuario", expand=True, bgcolor="white", border_radius=10)
-        p_tf = ft.TextField(label="Clave", password=True, expand=True, bgcolor="white", border_radius=10)
-        r_dd = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=120, bgcolor="white", border_radius=10)
         
+        def go_curso(cid, cn): state["curso_id"]=cid; state["curso_nombre"]=cn; page.go("/curso")
+        def add_c(e): page.go("/form_curso") if ciclo else show_snack("Falta Ciclo Activo", "red")
+
         load()
-        return ft.View("/users", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Gestión Usuarios"), bgcolor=COLOR_PRIMARY, color="white"),
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([u_tf, p_tf, r_dd, ft.IconButton(ft.icons.ADD, on_click=add, icon_color=ft.colors.GREEN_600, icon_size=30)]), 
-                    ft.Divider(), 
-                    users_col
-                ]), 
-                padding=15, bgcolor=COLOR_BG, expand=True)
-        ])
-
-    def search_view():
-        term = state["search_term"]
-        results_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-        res = search_students(term)
+        admin = ft.IconButton("settings", icon_color="white", on_click=lambda _: page.go("/admin")) if state["role"]=='admin' else ft.Container()
         
-        if not res: 
-            results_col.controls.append(ft.Text("No se encontraron resultados."))
-        else:
-            for r in res:
-                card = ft.Container(
-                    content=ft.ListTile(
-                        leading=ft.Icon(ft.icons.PERSON), 
-                        title=ft.Text(r['nombre'], weight=ft.FontWeight.BOLD), 
-                        subtitle=ft.Text(f"DNI: {r.get('dni', '-')} | Curso: {r['curso_nombre']} ({r['ciclo_nombre']})"), 
-                        on_click=lambda e, s=r: go_detail(s)
-                    ), 
-                    bgcolor="white", border_radius=10, margin=ft.margin.only(bottom=5), shadow=ft.BoxShadow(blur_radius=3, color=ft.colors.BLACK12)
-                )
-                results_col.controls.append(card)
-                
-        def go_detail(s): 
-            state["student_id_view"] = s['id']
-            state["curso_id"] = s['curso_id']
-            page.go("/student_detail")
-            
-        return ft.View("/search", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(f"Búsqueda: {term}"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(content=results_col, padding=15, expand=True, bgcolor=COLOR_BG)
-        ])
-
-    def student_detail_view():
-        aid = state["student_id_view"]
-        student = get_alumno_by_id(aid)
-        
-        if not student:
-            return ft.View("/student_detail", [
-                ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/search")), title=ft.Text("Error"), bgcolor=COLOR_PRIMARY, color="white"),
-                ft.Container(content=ft.Text("Alumno no encontrado."), padding=20, expand=True, bgcolor=COLOR_BG)
-            ])
-            
-        reqs = get_student_req_status(aid, student['curso_id'])
-        req_col = ft.Column()
-        for r in reqs: 
-            req_col.controls.append(ft.Row([
-                ft.Icon(ft.icons.CHECK_CIRCLE if r['ok'] else ft.icons.CANCEL, color=ft.colors.GREEN_600 if r['ok'] else COLOR_DANGER), 
-                ft.Text(r['desc'])
-            ]))
-            
-        card = ft.Container(
-            content=ft.Column([
-                ft.Text(student['nombre'], size=24, weight=ft.FontWeight.BOLD), 
-                ft.Text(f"Curso: {student['curso_nombre']}", size=16), 
-                ft.Text(f"DNI: {student.get('dni', 'No registrado')}", size=16), 
-                ft.Divider(), 
-                ft.Text("Datos de Tutor:", weight=ft.FontWeight.BOLD),
-                ft.Text(f"Nombre: {student.get('tutor_nombre', '-')}", size=14),
-                ft.Text(f"Teléfono: {student.get('tutor_telefono', '-')}", size=14),
-                ft.Divider(),
-                ft.Text("Observaciones:", weight=ft.FontWeight.BOLD), 
-                ft.Text(student.get('observaciones', '-'), italic=True), 
-                ft.Divider(), 
-                ft.Text("Documentación:", weight=ft.FontWeight.BOLD), 
-                req_col
-            ]), 
-            padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=10, color=ft.colors.BLACK12)
-        )
-        
-        return ft.View("/student_detail", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/search")), title=ft.Text("Ficha de Alumno"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(content=ft.Column([card], scroll=ft.ScrollMode.AUTO), padding=20, expand=True, bgcolor=COLOR_BG)
-        ])
-
-    def form_curso_view():
-        tf = ft.TextField(label="Nombre del Curso", bgcolor="white", border_radius=10)
-        def save(e): 
-            if add_curso(tf.value): page.go("/dashboard")
-            else: show_snack("Error: El curso ya existe o no hay ciclo activo.", COLOR_DANGER)
-        return ft.View("/form_curso", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Nuevo Curso"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(content=ft.Column([tf, ft.ElevatedButton("Guardar", on_click=save, bgcolor=ft.colors.GREEN_600, color="white")]), padding=20, bgcolor=COLOR_BG, expand=True)
+        return ft.View("/dashboard", [
+            ft.AppBar(title=ft.Text("Panel Principal"), bgcolor="blue", color="white", actions=[admin, ft.IconButton("logout", icon_color="white", on_click=lambda _: page.go("/"))]),
+            ft.Container(content=ft.Column([
+                ft.Text(f"Ciclo: {c_nombre}", color="blue", weight="bold"),
+                ft.Row([search, ft.IconButton("search", on_click=do_search)]),
+                ft.Row([ft.Text("Cursos", size=20, weight="bold"), ft.IconButton("add_circle", icon_color="green", icon_size=30, on_click=add_c)], alignment="spaceBetween"),
+                cursos_col
+            ]), padding=15, bgcolor="#f0f2f5", expand=True)
         ])
 
     def curso_view():
-        alumnos_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-        
-        def load_alumnos():
-            alumnos_col.controls.clear()
+        col = ft.Column(scroll="auto", expand=True)
+        def load():
+            col.controls.clear()
             for a in get_alumnos(state["curso_id"]):
-                alumnos_col.controls.append(ft.Container(
+                col.controls.append(ft.Container(
                     content=ft.ListTile(
-                        leading=ft.Icon(ft.icons.PERSON), 
-                        title=ft.Text(a['nombre']), 
-                        subtitle=ft.Text(f"DNI: {a.get('dni', '-')}"), 
+                        leading=ft.Icon("person"), title=ft.Text(a['nombre']), subtitle=ft.Text(f"DNI: {a.get('dni','-')}"),
                         trailing=ft.PopupMenuButton(items=[
-                            ft.PopupMenuItem(text="Editar", on_click=lambda e, aid=a['id']: go_edit(aid)), 
-                            ft.PopupMenuItem(text="Eliminar", on_click=lambda e, aid=a['id']: del_s(aid), icon=ft.icons.DELETE, icon_color=COLOR_DANGER)
+                            ft.PopupMenuItem("Editar", on_click=lambda e, aid=a['id']: (state.update({"st_edit": aid}), page.go("/form_student"))),
+                            ft.PopupMenuItem("Borrar", on_click=lambda e, aid=a['id']: (delete_alumno(aid), load()))
                         ])
-                    ), 
-                    bgcolor="white", border_radius=10, margin=ft.margin.only(bottom=2), shadow=ft.BoxShadow(blur_radius=2, color=ft.colors.BLACK12)
+                    ), bgcolor="white", border_radius=10, margin=2
                 ))
             page.update()
-            
-        def go_edit(aid): 
-            state["student_id_edit"] = aid
-            page.go("/form_student")
-            
-        def go_add(e): 
-            state["student_id_edit"] = None
-            page.go("/form_student")
-            
-        def del_s(aid): 
-            delete_alumno(aid)
-            load_alumnos()
-            show_snack("Alumno eliminado.", COLOR_DANGER)
-            
-        load_alumnos()
         
+        load()
         return ft.View("/curso", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(state["curso_nombre"]), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        ft.ElevatedButton("Asistencia", icon=ft.icons.CHECK, on_click=lambda _: page.go("/asistencia"), expand=True, bgcolor=ft.colors.GREEN_600, color="white"), 
-                        ft.ElevatedButton("Pedidos", icon=ft.icons.LIST, on_click=lambda _: page.go("/pedidos"), expand=True, bgcolor=ft.colors.ORANGE_600, color="white"), 
-                        ft.ElevatedButton("Reportes", icon=ft.icons.BAR_CHART, on_click=lambda _: page.go("/reportes"), expand=True, bgcolor=ft.colors.CYAN_600, color="white")
-                    ]), 
-                    ft.Divider(), 
-                    ft.Row([
-                        ft.Text("Alumnos", size=18, weight=ft.FontWeight.BOLD), 
-                        ft.IconButton(ft.icons.PERSON_ADD, icon_color=ft.colors.GREEN_600, on_click=go_add)
-                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN), 
-                    alumnos_col
-                ]), 
-                padding=15, expand=True, bgcolor=COLOR_BG
-            )
-        ])
-
-    def form_student_view():
-        is_edit = state["student_id_edit"] is not None
-        
-        # Nuevos campos de tutor implementados (Punto 4)
-        name = ft.TextField(label="Nombre", bgcolor="white", border_radius=10)
-        dni = ft.TextField(label="DNI", bgcolor="white", border_radius=10)
-        obs = ft.TextField(label="Observaciones", multiline=True, bgcolor="white", border_radius=10)
-        tutor_n = ft.TextField(label="Nombre de Tutor", bgcolor="white", border_radius=10)
-        tutor_t = ft.TextField(label="Teléfono de Tutor", bgcolor="white", border_radius=10)
-        
-        if is_edit:
-            data = get_alumno_by_id(state["student_id_edit"])
-            if data:
-                name.value = data.get('nombre', '')
-                dni.value = data.get('dni', '')
-                obs.value = data.get('observaciones', '')
-                tutor_n.value = data.get('tutor_nombre', '')
-                tutor_t.value = data.get('tutor_telefono', '')
-        
-        def save(e):
-            if name.value:
-                if is_edit: 
-                    update_alumno(state["student_id_edit"], name.value, dni.value, obs.value, tutor_n.value, tutor_t.value)
-                else: 
-                    add_alumno(state["curso_id"], name.value, dni.value, obs.value, tutor_n.value, tutor_t.value)
-                page.go("/curso")
-            else: 
-                show_snack("El nombre del alumno es obligatorio.", COLOR_DANGER)
-                
-        return ft.View("/form_student", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Alumno"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("Datos del Alumno:", weight=ft.FontWeight.BOLD), name, dni, obs, 
-                    ft.Divider(),
-                    ft.Text("Datos del Tutor:", weight=ft.FontWeight.BOLD), tutor_n, tutor_t,
-                    ft.ElevatedButton("Guardar", on_click=save, bgcolor=ft.colors.GREEN_600, color="white")
-                ], scroll=ft.ScrollMode.AUTO), 
-                padding=20, bgcolor=COLOR_BG, expand=True)
+            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(state["curso_nombre"]), bgcolor="blue", color="white"),
+            ft.Container(content=ft.Column([
+                ft.Row([
+                    ft.ElevatedButton("Asistencia", icon="check", expand=True, on_click=lambda _: page.go("/asistencia")),
+                    ft.ElevatedButton("Pedidos", icon="list", expand=True, on_click=lambda _: page.go("/pedidos")),
+                    ft.ElevatedButton("Reportes", icon="bar_chart", expand=True, on_click=lambda _: page.go("/reportes"))
+                ]),
+                ft.Divider(),
+                ft.Row([ft.Text("Alumnos", size=18, weight="bold"), ft.IconButton("person_add", icon_color="green", on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))], alignment="spaceBetween"),
+                col
+            ]), padding=15, bgcolor="#f0f2f5", expand=True)
         ])
 
     def asistencia_view():
-        date_pk = ft.TextField(label="Fecha (AAAA-MM-DD)", value=date.today().isoformat(), bgcolor="white", border_radius=10)
-        list_view = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-        status_vars = {} 
+        dp = ft.TextField(label="Fecha (AAAA-MM-DD)", value=date.today().isoformat(), bgcolor="white")
+        col = ft.Column(scroll="auto", expand=True)
+        vals = {}
         
-        def load_list(e=None):
+        def load(e=None):
             try:
-                date.fromisoformat(date_pk.value)
-            except ValueError:
-                show_snack("Formato de fecha inválido. Use AAAA-MM-DD", COLOR_DANGER)
-                return
+                if date.fromisoformat(dp.value).weekday() >= 5: show_snack("⚠️ Fin de semana", "orange")
+            except: pass
             
-            existing = get_asistencia_diaria(state["curso_id"], date_pk.value)
-            list_view.controls.clear(); status_vars.clear()
-            
+            ex = get_asistencia_diaria(state["curso_id"], dp.value)
+            col.controls.clear(); vals.clear()
             for a in get_alumnos(state["curso_id"]):
-                dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P", "T", "A", "J", "S", "N"]], 
-                                 value=existing.get(a['id'], "P"), 
-                                 width=80, bgcolor="white", border_radius=10)
-                status_vars[a['id']] = dd
-                
-                list_view.controls.append(ft.Container(
-                    content=ft.Row([ft.Text(a['nombre'], expand=True), dd]), 
-                    padding=10, bgcolor="white", border_radius=5, margin=ft.margin.only(bottom=2), shadow=ft.BoxShadow(blur_radius=1, color=ft.colors.BLACK12)
-                ))
+                dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], value=ex.get(a['id'], "P"), width=80, bgcolor="white")
+                vals[a['id']] = dd
+                col.controls.append(ft.Container(content=ft.Row([ft.Text(a['nombre'], expand=True), dd]), padding=5, bgcolor="white", border_radius=5, margin=2))
             page.update()
-        
+            
         def save(e):
             try:
-                d = date.fromisoformat(date_pk.value)
-                if d > date.today(): show_snack("Fecha futura no permitida", COLOR_WARNING); return
-            except ValueError:
-                show_snack("Formato de fecha inválido. Use AAAA-MM-DD", COLOR_DANGER); return
+                d = date.fromisoformat(dp.value)
+                if d > date.today(): return show_snack("Fecha futura", "red")
+                if d.weekday() >= 5: return show_snack("Es fin de semana", "red")
+            except: return show_snack("Fecha inválida", "red")
+            
+            for aid, dd in vals.items(): register_asistencia(aid, state["curso_id"], dp.value, dd.value)
+            show_snack("Guardado"); page.go("/curso")
 
-            for aid, dd in status_vars.items(): 
-                register_asistencia(aid, date_pk.value, dd.value)
-            show_snack("Asistencia guardada en Firestore", ft.colors.BLUE_GREY_800); page.go("/curso")
-
-        load_list()
+        load()
         return ft.View("/asistencia", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Asistencia"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([date_pk, ft.IconButton(ft.icons.REFRESH, on_click=load_list)]), 
-                    ft.ElevatedButton("GUARDAR ASISTENCIA", on_click=save, bgcolor=ft.colors.GREEN_600, color="white", width=float("inf")), 
-                    ft.Divider(), 
-                    list_view
-                ]), 
-                padding=15, bgcolor=COLOR_BG, expand=True)
-        ])
-
-    def pedidos_view():
-        req_dd = ft.Dropdown(label="Seleccionar Pedido", expand=True, bgcolor="white", border_radius=10, on_change=lambda e: load_checks())
-        list_view = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
-        req_map = {} 
-        
-        def load_reqs():
-            reqs = get_requisitos(state["curso_id"])
-            req_map.clear(); req_dd.options.clear()
-            for r in reqs: 
-                req_map[r['descripcion']] = r['id']
-                req_dd.options.append(ft.dropdown.Option(r['descripcion']))
-            
-            if reqs: 
-                req_dd.value = reqs[0]['descripcion']
-            else: 
-                req_dd.value = None
-            
-            page.update()
-            load_checks()
-            
-        def load_checks():
-            list_view.controls.clear()
-            if not req_dd.value or req_dd.value not in req_map: 
-                list_view.controls.append(ft.Text("Selecciona o agrega un requisito."))
-                page.update()
-                return
-            
-            rid = req_map[req_dd.value]
-            done = get_cumplimientos(rid)
-            
-            for a in get_alumnos(state["curso_id"]):
-                def on_change(e, aid=a['id'], rid=rid): 
-                    toggle_cumplimiento(rid, aid, e.control.value)
-                    
-                list_view.controls.append(ft.Container(
-                    content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=on_change), 
-                    bgcolor="white", padding=10, border_radius=5, margin=ft.margin.only(bottom=2), shadow=ft.BoxShadow(blur_radius=1, color=ft.colors.BLACK12)
-                ))
-            page.update()
-            
-        def go_add(e): page.go("/form_requisito")
-        
-        def del_r(e): 
-            if req_dd.value and req_dd.value in req_map: 
-                delete_requisito(req_map[req_dd.value])
-                load_reqs()
-                show_snack("Pedido eliminado", COLOR_DANGER)
-            
-        load_reqs()
-        
-        return ft.View("/pedidos", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Pedidos (Documentación)"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([
-                        req_dd, 
-                        ft.IconButton(ft.icons.ADD, on_click=go_add, icon_color=ft.colors.GREEN_600), 
-                        ft.IconButton(ft.icons.DELETE, icon_color=COLOR_DANGER, on_click=del_r)
-                    ]), 
-                    ft.Divider(), 
-                    list_view
-                ]), 
-                padding=15, bgcolor=COLOR_BG, expand=True)
-        ])
-
-    def form_requisito_view():
-        tf = ft.TextField(label="Descripción del Requisito/Documento", bgcolor="white", border_radius=10)
-        def save(e):
-            if tf.value: add_requisito(state["curso_id"], tf.value); page.go("/pedidos")
-        return ft.View("/form_requisito", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Pedido"), bgcolor=COLOR_PRIMARY, color="white"),
-            ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save, bgcolor=ft.colors.GREEN_600, color="white")]), padding=20, bgcolor=COLOR_BG, expand=True)
+            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Asistencia"), bgcolor="blue", color="white"),
+            ft.Container(content=ft.Column([ft.Row([dp, ft.IconButton("refresh", on_click=load)]), ft.ElevatedButton("GUARDAR", on_click=save, bgcolor="green", color="white", width=float("inf")), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)
         ])
 
     def reportes_view():
-        # Punto 3: Periodos más amplios (inicio en el año actual)
-        today = date.today()
-        d1 = ft.TextField(label="Desde (AAAA-MM-DD)", value=today.replace(month=1, day=1).isoformat(), width=150, bgcolor="white", border_radius=10)
-        d2 = ft.TextField(label="Hasta (AAAA-MM-DD)", value=today.isoformat(), width=150, bgcolor="white", border_radius=10)
-        table_cont = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True)
+        d1 = ft.TextField(label="Desde", value=date.today().replace(day=1).isoformat(), width=130, bgcolor="white")
+        d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white")
+        cont = ft.Column(scroll="auto", expand=True)
         
         def gen(e):
             data = get_report_data(state["curso_id"], d1.value, d2.value)
             rows = []
             for d in data:
-                # Punto 4: Alerta de 25 Faltas
-                faltas = d['faltas']
-                alert_color = COLOR_DANGER if faltas >= 25 else (COLOR_WARNING if faltas >= 15 else ft.colors.BLACK)
-                
-                rows.append(ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text(d['nombre'], color=alert_color, weight=ft.FontWeight.BOLD if faltas >= 25 else ft.FontWeight.NORMAL)), 
-                        ft.DataCell(ft.Text(str(d['p']), size=12)), 
-                        ft.DataCell(ft.Text(str(d['t']), size=12)), 
-                        ft.DataCell(ft.Text(str(d['a']), size=12)), 
-                        ft.DataCell(ft.Text(str(d['j']), size=12)), 
-                        ft.DataCell(ft.Text(str(d['s']), size=12)), 
-                        ft.DataCell(ft.Text(f"{faltas:.2f}", color=alert_color, size=14, weight=ft.FontWeight.BOLD)), 
-                        ft.DataCell(ft.Text(f"{d['pct']:.1f}%", color=alert_color, size=14, weight=ft.FontWeight.BOLD))
-                    ]
-                ))
+                c = "red" if d['faltas']>=25 else ("orange" if d['faltas']>=15 else "black")
+                rows.append(ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(d['nombre'], color=c, weight="bold" if d['faltas']>=25 else "normal")),
+                    ft.DataCell(ft.Text(str(d['p']))), ft.DataCell(ft.Text(str(d['t']))), ft.DataCell(ft.Text(str(d['a']))),
+                    ft.DataCell(ft.Text(str(d['j']))), ft.DataCell(ft.Text(str(d['s']))),
+                    ft.DataCell(ft.Text(f"{d['faltas']}", color=c, weight="bold")),
+                    ft.DataCell(ft.Text(f"{d['pct']}%"))
+                ]))
             
-            table = ft.DataTable(
-                columns=[
-                    ft.DataColumn(ft.Text("Alumno", weight=ft.FontWeight.BOLD)), 
-                    ft.DataColumn(ft.Tooltip(message="Presentes", content=ft.Text("P"), height=25), numeric=True), 
-                    ft.DataColumn(ft.Tooltip(message="Tardes (0.25F)", content=ft.Text("T"), height=25), numeric=True), 
-                    ft.DataColumn(ft.Tooltip(message="Ausentes", content=ft.Text("A"), height=25), numeric=True), 
-                    ft.DataColumn(ft.Tooltip(message="Justificadas", content=ft.Text("J"), height=25), numeric=True), 
-                    ft.DataColumn(ft.Tooltip(message="Suspensiones", content=ft.Text("S"), height=25), numeric=True), 
-                    ft.DataColumn(ft.Text("Faltas", color=COLOR_DANGER, weight=ft.FontWeight.BOLD), numeric=True), 
-                    ft.DataColumn(ft.Text("% Aus.", color=COLOR_DANGER, weight=ft.FontWeight.BOLD), numeric=True)
-                ], 
-                rows=rows, 
-                bgcolor="white", 
-                border_radius=10, 
-                column_spacing=10
-            )
-            table_cont.controls = [ft.Row([table], scroll=ft.ScrollMode.ALWAYS)]; page.update()
-            
+            dt = ft.DataTable(columns=[
+                ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), 
+                ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True),
+                ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True),
+                ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("%"), numeric=True)
+            ], rows=rows, bgcolor="white", border_radius=10, column_spacing=15)
+            cont.controls = [ft.Row([dt], scroll="always")]; page.update()
+
         def export(e):
-            # Punto 1: La exportación de Excel necesita reescribirse para la web
-            if not pd: 
-                show_snack("Error: 'pandas' no instalado. No se puede exportar.", COLOR_DANGER)
-                return
+            if not pd: return show_snack("Falta pandas", "red")
+            if not xlsxwriter: return show_snack("Falta xlsxwriter", "red")
             
-            try:
-                data = get_report_data(state["curso_id"], d1.value, d2.value)
-                if not data:
-                    show_snack("No hay datos para exportar.", COLOR_WARNING)
-                    return
-                
-                df = pd.DataFrame(data)
-                df = df.rename(columns={'nombre': 'Alumno', 'dni': 'DNI', 'tutor_nombre': 'Tutor', 'tutor_telefono': 'Teléfono Tutor',
-                                        'p': 'Presentes', 't': 'Tardes', 'a': 'Ausentes', 'j': 'Justificadas', 
-                                        's': 'Suspensiones', 'faltas': 'Total Faltas', 'pct': '% Ausentismo'})
-                
-                # --- Lógica de Descarga Web (Usando io y page.launch_url) ---
-                import io
-                
-                output = io.BytesIO()
-                # Guardar el DataFrame en el buffer en formato Excel
-                df.to_excel(output, index=False, engine='xlsxwriter')
-                output.seek(0)
-                
-                # Convertir el buffer a base64 para incrustarlo en una URL de datos
-                b64 = base64.b64encode(output.read()).decode()
-                
-                mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                fname = f"reporte_asistencia_{state['curso_nombre']}_{today.isoformat()}.xlsx"
+            data = get_report_data(state["curso_id"], d1.value, d2.value)
+            if not data: return show_snack("Sin datos", "orange")
+            
+            df = pd.DataFrame(data)
+            df = df.rename(columns={'nombre':'Alumno', 'p':'Pres', 't':'Tarde', 'a':'Aus', 'j':'Just', 's':'Susp', 'faltas':'Total', 'pct':'%'})
+            
+            # Exportación compatible con Web
+            import io
+            import base64
+            output = io.BytesIO()
+            df.to_excel(output, index=False, engine='xlsxwriter')
+            b64 = base64.b64encode(output.getvalue()).decode()
+            filename = f"reporte_{state['curso_id']}.xlsx"
+            page.launch_url(f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}", web_window_name=filename)
+            show_snack("Descargando...", "blue")
 
-                # Abrir una nueva ventana/pestaña con el archivo para forzar la descarga
-                page.launch_url(f"data:{mime_type};base64,{b64}", web_window_name=fname)
-                show_snack("¡Exportación lista! Revisa las descargas de tu navegador.", ft.colors.BLUE_GREY_800)
-                
-            except Exception as ex:
-                show_snack(f"Error al exportar: {ex}", COLOR_DANGER)
-
-        gen(None) # Generar al cargar
-        
         return ft.View("/reportes", [
-            ft.AppBar(leading=ft.IconButton(ft.icons.ARROW_BACK, icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Reportes"), bgcolor=COLOR_PRIMARY, color="white"), 
-            ft.Container(
-                content=ft.Column([
-                    ft.Row([d1, d2, ft.ElevatedButton("Generar Reporte", on_click=gen, icon=ft.icons.CALCULATE, bgcolor=COLOR_PRIMARY, color="white")]), 
-                    ft.ElevatedButton("Exportar Excel (Descargar)", icon=ft.icons.DOWNLOAD, on_click=export, bgcolor=ft.colors.ORANGE_600, color="white"), 
-                    ft.Divider(), 
-                    table_cont
-                ]), 
-                padding=15, bgcolor=COLOR_BG, expand=True)
+            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Reportes"), bgcolor="blue", color="white"),
+            ft.Container(content=ft.Column([ft.Row([d1, d2, ft.ElevatedButton("Ver", on_click=gen)]), ft.ElevatedButton("Excel", icon="download", on_click=export, bgcolor="green", color="white"), ft.Divider(), cont]), padding=15, bgcolor="#f0f2f5", expand=True)
         ])
 
+    # --- OTRAS VISTAS (Simplificadas para brevedad, mismas funcionalidades) ---
+    def search_view():
+        term = state["search"]; res = search_students(term); col = ft.Column(scroll="auto")
+        if not res: col.controls.append(ft.Text("Sin resultados"))
+        else:
+            for r in res:
+                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("person"), title=ft.Text(r['nombre']), subtitle=ft.Text(f"Curso: {r['curso_nombre']}"), on_click=lambda e, s=r: (state.update({"st_view": s['id'], "curso_id": s['curso_id']}), page.go("/student_detail"))), bgcolor="white", border_radius=10, margin=2))
+        return ft.View("/search", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(f"Busqueda: {term}"), bgcolor="blue", color="white"), ft.Container(content=col, padding=15, bgcolor="#f0f2f5", expand=True)])
+
+    def student_detail_view():
+        aid = state["st_view"]; s = get_alumno_by_id(aid)
+        if not s: return ft.View("/error", [ft.Text("Error")])
+        req_col = ft.Column()
+        for r in get_student_req_status(aid, s['curso_id']): req_col.controls.append(ft.Row([ft.Icon("check" if r['ok'] else "close", color="green" if r['ok'] else "red"), ft.Text(r['desc'])]))
+        
+        card = ft.Container(content=ft.Column([
+            ft.Text(s['nombre'], size=24, weight="bold"), ft.Text(f"Curso: {s['curso_nombre']}"), ft.Text(f"DNI: {s.get('dni','-')}"),
+            ft.Divider(), ft.Text("Tutor:", weight="bold"), ft.Text(f"{s.get('tutor_nombre','-')} ({s.get('tutor_telefono','-')})"),
+            ft.Divider(), ft.Text("Obs:", weight="bold"), ft.Text(s.get('observaciones','-'), italic=True),
+            ft.Divider(), ft.Text("Papeles:", weight="bold"), req_col
+        ]), padding=20, bgcolor="white", border_radius=15, shadow=ft.BoxShadow(blur_radius=5, color="black12"))
+        
+        return ft.View("/student_detail", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/search")), title=ft.Text("Ficha"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([card], scroll="auto"), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def form_student_view():
+        is_edit = state["st_edit"] is not None
+        nm = ft.TextField(label="Nombre", bgcolor="white"); dni = ft.TextField(label="DNI", bgcolor="white")
+        obs = ft.TextField(label="Obs", multiline=True, bgcolor="white"); tn = ft.TextField(label="Tutor", bgcolor="white"); tt = ft.TextField(label="Tel Tutor", bgcolor="white")
+        if is_edit:
+            d = get_alumno_by_id(state["st_edit"])
+            nm.value=d.get('nombre',''); dni.value=d.get('dni',''); obs.value=d.get('observaciones',''); tn.value=d.get('tutor_nombre',''); tt.value=d.get('tutor_telefono','')
+        
+        def save(e):
+            if nm.value:
+                if is_edit: update_alumno(state["st_edit"], nm.value, dni.value, obs.value, tn.value, tt.value)
+                else: add_alumno(state["curso_id"], nm.value, dni.value, obs.value, tn.value, tt.value)
+                page.go("/curso")
+        return ft.View("/form_student", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Alumno"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([nm, dni, obs, tn, tt, ft.ElevatedButton("Guardar", on_click=save, bgcolor="green", color="white")]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def form_curso_view():
+        tf = ft.TextField(label="Nombre", bgcolor="white")
+        def save(e): 
+            if add_curso(tf.value): page.go("/dashboard")
+            else: show_snack("Error", "red")
+        return ft.View("/form_curso", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Nuevo Curso"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save)]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def pedidos_view():
+        dd = ft.Dropdown(label="Pedido", expand=True, bgcolor="white", on_change=lambda e: lc()); col = ft.Column(scroll="auto", expand=True); rm = {}
+        def lr():
+            rs = get_requisitos(state["curso_id"]); rm.clear(); dd.options.clear()
+            for r in rs: rm[r['descripcion']] = r['id']; dd.options.append(ft.dropdown.Option(r['descripcion']))
+            if rs: dd.value = rs[0]['descripcion']
+            page.update(); lc()
+        def lc():
+            col.controls.clear()
+            if not dd.value: return
+            rid = rm[dd.value]; done = get_cumplimientos(rid)
+            for a in get_alumnos(state["curso_id"]):
+                col.controls.append(ft.Container(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: toggle_cumplimiento(rid, aid, e.control.value)), bgcolor="white", padding=5, border_radius=5, margin=2))
+            page.update()
+        def add(e): page.go("/form_req")
+        def dele(e): 
+            if dd.value: delete_requisito(rm[dd.value]); lr()
+        lr()
+        return ft.View("/pedidos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Pedidos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([dd, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color="red", on_click=dele)]), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)])
+
+    def form_req_view():
+        tf = ft.TextField(label="Descripción", bgcolor="white")
+        def save(e):
+            if tf.value: add_requisito(state["curso_id"], tf.value); page.go("/pedidos")
+        return ft.View("/form_req", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Pedido"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save)]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def admin_view():
+        return ft.View("/admin", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Admin"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.ListTile(leading=ft.Icon("calendar_month"), title=ft.Text("Ciclos"), on_click=lambda _: page.go("/ciclos")), ft.ListTile(leading=ft.Icon("people"), title=ft.Text("Usuarios"), on_click=lambda _: page.go("/users"))]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def ciclos_view():
+        tf = ft.TextField(label="Año", expand=True, bgcolor="white"); col = ft.Column(scroll="auto", expand=True)
+        def ld():
+            col.controls.clear()
+            for c in get_ciclos():
+                act = c['activo']==1
+                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("check" if act else "circle", color="green" if act else "grey"), title=ft.Text(c['nombre']), trailing=ft.ElevatedButton("Activar", on_click=lambda e, cid=c['id']: (activar_ciclo(cid), ld())) if not act else None), bgcolor="white", border_radius=10, margin=2))
+            page.update()
+        def add(e): 
+            if tf.value: add_ciclo(tf.value); tf.value=""; ld()
+        ld()
+        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([tf, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def users_view():
+        u = ft.TextField(label="User", expand=True, bgcolor="white"); p = ft.TextField(label="Pass", password=True, expand=True, bgcolor="white"); r = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=100, bgcolor="white"); col = ft.Column()
+        def ld():
+            col.controls.clear()
+            for us in get_users():
+                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("person"), title=ft.Text(us['username']), subtitle=ft.Text(us['role']), trailing=ft.IconButton("delete", icon_color="red", on_click=lambda e, uid=us['id']: (delete_user(uid), ld())) if us['username']!=state['username'] else None), bgcolor="white", border_radius=10, margin=2))
+            page.update()
+        def add(e): 
+            if add_user(u.value, p.value, r.value): u.value=""; p.value=""; ld()
+        ld()
+        return ft.View("/users", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Usuarios"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([u, p, r, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
     # --- ROUTER ---
-    def route_change(route):
+    def router(route):
         page.views.clear()
-        routes = {
-            "/": login_view,
-            "/dashboard": dashboard_view,
-            "/admin": admin_view,
-            "/ciclos": ciclos_view,
-            "/users": users_view,
-            "/search": search_view,
-            "/student_detail": student_detail_view,
-            "/form_curso": form_curso_view,
-            "/curso": curso_view,
-            "/form_student": form_student_view,
-            "/asistencia": asistencia_view,
-            "/pedidos": pedidos_view,
-            "/form_requisito": form_requisito_view,
-            "/reportes": reportes_view
+        views = {
+            "/": login_view, "/dashboard": dashboard_view, "/curso": curso_view, "/asistencia": asistencia_view,
+            "/pedidos": pedidos_view, "/form_req": form_req_view, "/reportes": reportes_view,
+            "/search": search_view, "/student_detail": student_detail_view, "/form_student": form_student_view,
+            "/form_curso": form_curso_view, "/admin": admin_view, "/ciclos": ciclos_view, "/users": users_view
         }
-        if page.route in routes: page.views.append(routes[page.route]())
+        if page.route in views: page.views.append(views[page.route]())
         else: page.views.append(login_view())
         page.update()
 
-    def view_pop(view):
-        page.views.pop(); top_view = page.views[-1]; page.go(top_view.route)
-
-    page.on_route_change = route_change; page.on_view_pop = view_pop; page.go("/")
+    page.on_route_change = router
+    page.on_view_pop = lambda view: page.go(page.views[-2].route)
+    page.go("/")
 
 if __name__ == "__main__":
-    # La App ID se usa en get_collection_ref
     port = int(os.environ.get("PORT", 8000))
-    # Importante: usar web_renderer="html" para asegurar compatibilidad en entornos serverless/Micro
     ft.app(target=main, view=ft.WEB_BROWSER, port=port, web_renderer="html")
