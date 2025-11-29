@@ -3,7 +3,7 @@ import sqlite3
 import hashlib
 from datetime import date
 import os
-import time
+# import time  <-- Eliminamos import no usado
 
 # --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS CON MANEJO DE ERRORES ---
 try:
@@ -689,4 +689,4 @@ def main(page: ft.Page):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    ft.app(target=main, view=ft.WEB_BROWSER, port=port, web_renderer="html")
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=port, web_renderer="html")
