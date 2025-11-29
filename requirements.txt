@@ -1,1 +1,6 @@
-fletpandasopenpyxlNueva dependencia para la base de datos persistentefirebase-admin
+flet
+pandas
+openpyxl
+xlsxwriter
+pillow
+firebase-admin
