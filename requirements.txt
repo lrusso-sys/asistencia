@@ -4,3 +4,14 @@ openpyxl
 xlsxwriter
 pillow
 firebase-admin
+uvicorn
+
+
+### 3. Entender los Logs de Render
+
+En el panel de Render, mira la pestaña **"Logs"**.
+1.  Deberías ver que se instalan las librerías (`Successfully installed...`).
+2.  Luego, deberías ver nuestro mensaje: `🚀 Iniciando servidor web en puerto 10000...` (el número puede variar).
+3.  Si ves ese mensaje, ¡significa que tu código Python arrancó! Render tardará unos segundos más en detectar el puerto y cambiará el estado a **"Live"** (verde).
+
+**Resumen:** Haz el cambio en el bloque final del código, súbelo a GitHub y espera unos 2 minutos mirando los logs. ¡Debería funcionar!
