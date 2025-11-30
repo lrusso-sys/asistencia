@@ -623,10 +623,16 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
+    # CONFIGURACIÓN DE ARRANQUE PARA NUBE Y LOCAL
     port_env = os.environ.get("PORT")
+    
     if port_env:
-        print(f"🚀 NUBE: Puerto {port_env}")
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        # MODO NUBE (Render): 
+        # - host="0.0.0.0" es OBLIGATORIO.
+        # - Quitamos 'view=' para que actúe solo como servidor web.
+        print(f"🚀 Iniciando servidor web en puerto {port_env}...")
+        ft.app(target=main, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        print("🏠 LOCAL: Iniciando...")
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER)
+        # MODO LOCAL:
+        print("🏠 Iniciando en LOCAL")
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550, web_renderer="html")
