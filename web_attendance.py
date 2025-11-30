@@ -7,7 +7,7 @@ import json
 import base64
 import io
 
-# --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS ---
+# --- IMPORTACIÓN DE LIBRERÍAS EXTERNAS CON MANEJO DE ERRORES ---
 try:
     import pandas as pd
 except ImportError:
@@ -33,7 +33,7 @@ except ImportError:
     print("⚠️ ADVERTENCIA: 'firebase-admin' no está instalado. Se usará SQLite localmente.")
 
 # ======================================================================
-# 1. LÓGICA DE BASE DE DATOS
+# 1. LÓGICA DE BASE DE DATOS (Híbrido: Firestore Cloud / SQLite Local)
 # ======================================================================
 
 DB_NAME = 'asistencia_alumnos.db'
@@ -47,8 +47,10 @@ def get_sqlite_conn():
     return conn
 
 def init_backend():
+    # 1. Inicializar SQLite siempre como respaldo
     init_sqlite_db()
-    
+
+    # 2. Intentar Inicializar Firestore
     global db_firestore, app_id
     firebase_config_str = os.environ.get('__firebase_config', None)
     app_id = os.environ.get('__app_id', 'local-dev')
@@ -79,6 +81,7 @@ def init_sqlite_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
     
+    # Migraciones simples
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
@@ -103,7 +106,9 @@ def get_col(name):
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# --- CRUD ---
+# ======================================================================
+# FUNCIONES CRUD
+# ======================================================================
 
 def authenticate_user(username, password):
     pwd = hash_password(password)
@@ -111,8 +116,7 @@ def authenticate_user(username, password):
         try:
             q = get_col('Usuarios').where('username', '==', username).limit(1).stream()
             doc = next(q, None)
-            if doc and doc.to_dict().get('password') == pwd:
-                return (True, doc.to_dict().get('role'))
+            if doc and doc.to_dict().get('password') == pwd: return (True, doc.to_dict().get('role'))
             if not doc and username=="admin" and password=="admin":
                  if not next(get_col('Usuarios').limit(1).stream(), None):
                      add_user("admin", "admin", "admin")
@@ -417,7 +421,6 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
-    # --- VISTAS ---
     def login_view():
         user = ft.TextField(label="Usuario", width=300, bgcolor="white")
         pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white")
@@ -439,7 +442,7 @@ def main(page: ft.Page):
     def dashboard_view():
         ciclo = get_ciclo_activo()
         c_nombre = ciclo['nombre'] if ciclo else "Sin Ciclo Activo"
-        search = ft.TextField(hint_text="Buscar alumno...", expand=True, bgcolor="white")
+        search = ft.TextField(hint_text="Buscar...", expand=True, bgcolor="white")
         def do_search(e): 
             if search.value: state["search"]=search.value; page.go("/search")
         
@@ -490,39 +493,12 @@ def main(page: ft.Page):
         def save(e):
             try:
                 d = date.fromisoformat(dp.value)
-                if d > date.today(): return show_snack("Fecha futura", "red")
-                if d.weekday() >= 5: return show_snack("Es fin de semana", "red")
-            except: return show_snack("Fecha inválida", "red")
+                if d > date.today() or d.weekday() >= 5: return show_snack("Fecha inválida", "red")
+            except: return show_snack("Error fecha", "red")
             for aid, dd in vals.items(): register_asistencia(aid, state["curso_id"], dp.value, dd.value)
             show_snack("Guardado"); page.go("/curso")
         load()
         return ft.View("/asistencia", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Asistencia"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([dp, ft.IconButton("refresh", on_click=load)]), ft.ElevatedButton("GUARDAR", on_click=save, bgcolor="green", color="white", width=float("inf")), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)])
-
-    def pedidos_view():
-        dd = ft.Dropdown(label="Pedido", expand=True, bgcolor="white", on_change=lambda e: lc()); col = ft.Column(scroll="auto", expand=True); rm = {}
-        def lr():
-            rs = get_requisitos(state["curso_id"]); rm.clear(); dd.options.clear()
-            for r in rs: rm[r['descripcion']] = r['id']; dd.options.append(ft.dropdown.Option(r['descripcion']))
-            if rs: dd.value = rs[0]['descripcion']
-            page.update(); lc()
-        def lc():
-            col.controls.clear()
-            if not dd.value: return
-            rid = rm[dd.value]; done = get_cumplimientos(rid)
-            for a in get_alumnos(state["curso_id"]):
-                col.controls.append(ft.Container(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: toggle_cumplimiento(rid, aid, e.control.value)), bgcolor="white", padding=5, border_radius=5, margin=2))
-            page.update()
-        def add(e): page.go("/form_req")
-        def dele(e): 
-            if dd.value: delete_requisito(rm[dd.value]); lr()
-        lr()
-        return ft.View("/pedidos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Pedidos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([dd, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color="red", on_click=dele)]), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)])
-
-    def form_req_view():
-        tf = ft.TextField(label="Descripción", bgcolor="white")
-        def save(e):
-            if tf.value: add_requisito(state["curso_id"], tf.value); page.go("/pedidos")
-        return ft.View("/form_req", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Pedido"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save)]), padding=20, bgcolor="#f0f2f5", expand=True)])
 
     def reportes_view():
         d1 = ft.TextField(label="Desde", value=date.today().replace(day=1).isoformat(), width=130, bgcolor="white"); d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white")
@@ -543,34 +519,7 @@ def main(page: ft.Page):
             page.launch_url(f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}", web_window_name="reporte.xlsx")
         return ft.View("/reportes", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Reportes"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([d1, d2, ft.ElevatedButton("Ver", on_click=gen)]), ft.ElevatedButton("Excel", icon="download", on_click=export, bgcolor="green", color="white"), ft.Divider(), table_cont]), padding=15, bgcolor="#f0f2f5", expand=True)])
 
-    def admin_view():
-        return ft.View("/admin", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Admin"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.ListTile(leading=ft.Icon("calendar_month"), title=ft.Text("Ciclos"), on_click=lambda _: page.go("/ciclos")), ft.ListTile(leading=ft.Icon("people"), title=ft.Text("Usuarios"), on_click=lambda _: page.go("/users"))]), padding=20, bgcolor="#f0f2f5", expand=True)])
-
-    def ciclos_view():
-        tf = ft.TextField(label="Año", expand=True, bgcolor="white"); col = ft.Column(scroll="auto", expand=True)
-        def ld():
-            col.controls.clear()
-            for c in get_ciclos():
-                act = c['activo']==1
-                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("check" if act else "circle", color="green" if act else "grey"), title=ft.Text(c['nombre']), trailing=ft.ElevatedButton("Activar", on_click=lambda e, cid=c['id']: (activar_ciclo(cid), ld())) if not act else None), bgcolor="white", border_radius=10, margin=2))
-            page.update()
-        def add(e): 
-            if tf.value: add_ciclo(tf.value); tf.value=""; ld()
-        ld()
-        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([tf, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
-
-    def users_view():
-        u = ft.TextField(label="User", expand=True, bgcolor="white"); p = ft.TextField(label="Pass", password=True, expand=True, bgcolor="white"); r = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=100, bgcolor="white"); col = ft.Column()
-        def ld():
-            col.controls.clear()
-            for us in get_users():
-                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("person"), title=ft.Text(us['username']), subtitle=ft.Text(us['role']), trailing=ft.IconButton("delete", icon_color="red", on_click=lambda e, uid=us['id']: (delete_user(uid), ld())) if us['username']!=state['username'] else None), bgcolor="white", border_radius=10, margin=2))
-            page.update()
-        def add(e): 
-            if add_user(u.value, p.value, r.value): u.value=""; p.value=""; ld()
-        ld()
-        return ft.View("/users", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Usuarios"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([u, p, r, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
-
+    # --- OTRAS VISTAS ---
     def search_view():
         term = state["search"]; res = search_students(term); col = ft.Column(scroll="auto")
         if not res: col.controls.append(ft.Text("Sin resultados"))
@@ -605,6 +554,59 @@ def main(page: ft.Page):
             else: show_snack("Error", "red")
         return ft.View("/form_curso", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Nuevo Curso"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save)]), padding=20, bgcolor="#f0f2f5", expand=True)])
 
+    def pedidos_view():
+        dd = ft.Dropdown(label="Pedido", expand=True, bgcolor="white", on_change=lambda e: lc()); col = ft.Column(scroll="auto", expand=True); rm = {}
+        def lr():
+            rs = get_requisitos(state["curso_id"]); rm.clear(); dd.options.clear()
+            for r in rs: rm[r['descripcion']] = r['id']; dd.options.append(ft.dropdown.Option(r['descripcion']))
+            if rs: dd.value = rs[0]['descripcion']
+            page.update(); lc()
+        def lc():
+            col.controls.clear()
+            if not dd.value: return
+            rid = rm[dd.value]; done = get_cumplimientos(rid)
+            for a in get_alumnos(state["curso_id"]): col.controls.append(ft.Container(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: toggle_cumplimiento(rid, aid, e.control.value)), bgcolor="white", padding=5, border_radius=5, margin=2))
+            page.update()
+        def add(e): page.go("/form_req")
+        def dele(e): 
+            if dd.value: delete_requisito(rm[dd.value]); lr()
+        lr()
+        return ft.View("/pedidos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Pedidos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([dd, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color="red", on_click=dele)]), ft.Divider(), col]), padding=15, bgcolor="#f0f2f5", expand=True)])
+
+    def form_req_view():
+        tf = ft.TextField(label="Descripción", bgcolor="white")
+        def save(e):
+            if tf.value: add_requisito(state["curso_id"], tf.value); page.go("/pedidos")
+        return ft.View("/form_req", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Pedido"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([tf, ft.ElevatedButton("Crear", on_click=save)]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def admin_view():
+        return ft.View("/admin", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text("Admin"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.ListTile(leading=ft.Icon("calendar_month"), title=ft.Text("Ciclos"), on_click=lambda _: page.go("/ciclos")), ft.ListTile(leading=ft.Icon("people"), title=ft.Text("Usuarios"), on_click=lambda _: page.go("/users"))]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def ciclos_view():
+        tf = ft.TextField(label="Año", expand=True, bgcolor="white"); col = ft.Column(scroll="auto", expand=True)
+        def ld():
+            col.controls.clear()
+            for c in get_ciclos():
+                act = c['activo']==1
+                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("check" if act else "circle", color="green" if act else "grey"), title=ft.Text(c['nombre']), trailing=ft.ElevatedButton("Activar", on_click=lambda e, cid=c['id']: (activar_ciclo(cid), ld())) if not act else None), bgcolor="white", border_radius=10, margin=2))
+            page.update()
+        def add(e): 
+            if tf.value: add_ciclo(tf.value); tf.value=""; ld()
+        ld()
+        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([tf, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
+    def users_view():
+        u = ft.TextField(label="User", expand=True, bgcolor="white"); p = ft.TextField(label="Pass", password=True, expand=True, bgcolor="white"); r = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=100, bgcolor="white"); col = ft.Column()
+        def ld():
+            col.controls.clear()
+            for us in get_users():
+                col.controls.append(ft.Container(content=ft.ListTile(leading=ft.Icon("person"), title=ft.Text(us['username']), subtitle=ft.Text(us['role']), trailing=ft.IconButton("delete", icon_color="red", on_click=lambda e, uid=us['id']: (delete_user(uid), ld())) if us['username']!=state['username'] else None), bgcolor="white", border_radius=10, margin=2))
+            page.update()
+        def add(e): 
+            if add_user(u.value, p.value, r.value): u.value=""; p.value=""; ld()
+        ld()
+        return ft.View("/users", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Usuarios"), bgcolor="blue", color="white"), ft.Container(content=ft.Column([ft.Row([u, p, r, ft.IconButton("add", on_click=add)]), ft.Divider(), col]), padding=20, bgcolor="#f0f2f5", expand=True)])
+
     # --- ROUTER ---
     def router(route):
         page.views.clear()
@@ -623,16 +625,15 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
-    # CONFIGURACIÓN DE ARRANQUE PARA NUBE Y LOCAL
+    # CONFIGURACIÓN DE ARRANQUE ROBUSTA
     port_env = os.environ.get("PORT")
     
     if port_env:
-        # MODO NUBE (Render): 
-        # - host="0.0.0.0" es OBLIGATORIO.
-        # - Quitamos 'view=' para que actúe solo como servidor web.
+        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
+        # Importante: ft.WEB_BROWSER es la constante correcta en Flet moderno
         print(f"🚀 Iniciando servidor web en puerto {port_env}...")
-        ft.app(target=main, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # MODO LOCAL:
-        print("🏠 Iniciando en LOCAL")
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550, web_renderer="html")
+        # LOCAL: Usar puerto 8550 y localhost (127.0.0.1) para evitar errores de red en Windows
+        print("🏠 Iniciando en LOCAL (localhost:8550)")
+        ft.app(target=main, view=ft.WEB_BROWSER, port=8550, host="127.0.0.1", web_renderer="html")
