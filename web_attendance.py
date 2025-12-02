@@ -7,7 +7,6 @@ import base64
 import io
 
 # --- LIBRERÍAS OPCIONALES ---
-# NOTA: Necesitas instalar 'pandas' y 'xlsxwriter' para la función de exportación a Excel.
 try:
     import pandas as pd
 except ImportError:
@@ -47,12 +46,12 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
 
-    # Migración de columnas (para asegurar compatibilidad con versiones antiguas)
+    # Migración de columnas
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
 
-    # Usuario y Ciclo por defecto
+    # Datos por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
@@ -298,7 +297,7 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium Compatible)
+# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium)
 # ======================================================================
 
 def main(page: ft.Page):
