@@ -1,10 +1,7 @@
-flet
+flet 
 pandas
 openpyxl
 xlsxwriter
-pillow
-firebase-admin
-uvicorn
 
 
 
