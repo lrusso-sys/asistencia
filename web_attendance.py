@@ -7,19 +7,20 @@ import base64
 import io
 
 # --- LIBRERÍAS OPCIONALES ---
+# NOTA: Necesitas instalar 'pandas' y 'xlsxwriter' para la función de exportación a Excel.
 try:
     import pandas as pd
 except ImportError:
     pd = None
-    print("⚠️ Pandas no instalado.")
+    print("⚠️ Pandas no instalado. La exportación a Excel estará deshabilitada.")
 
 try:
     import xlsxwriter
 except ImportError:
-    print("⚠️ XlsxWriter no instalado.")
+    print("⚠️ XlsxWriter no instalado. La exportación a Excel estará deshabilitada.")
 
 # ======================================================================
-# 1. BASE DE DATOS (SQLite Local - Modo Demo)
+# 1. BASE DE DATOS (SQLite Local)
 # ======================================================================
 
 DB_NAME = 'asistencia_alumnos.db'
@@ -46,18 +47,15 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
 
-    # Migración de columnas (para asegurar compatibilidad)
+    # Migración de columnas (para asegurar compatibilidad con versiones antiguas)
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
 
-    # Datos por defecto para la DEMO
+    # Usuario y Ciclo por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
     if cursor.fetchone()[0] == 0:
-        # Usuario Admin: admin / admin
         cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
-        # Usuario Preceptor: prece / prece (para probar roles)
-        cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("prece", hash_password("prece"), "preceptor"))
     
     cursor.execute("SELECT COUNT(*) FROM Ciclos")
     if cursor.fetchone()[0] == 0:
@@ -428,15 +426,7 @@ def main(page: ft.Page):
                 def go_det(aid, cid): state["st_view"] = aid; state["curso_id"] = cid; page.go("/student_detail")
                 def edit_clk(aid): return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
                 def del_clk(aid): return lambda e: (delete_alumno(aid), load())
-                
-                list_tile = ft.ListTile(
-                    leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY),
-                    title=ft.Text(a['nombre'], weight="bold"),
-                    subtitle=ft.Text(f"DNI: {a.get('dni','-')}"),
-                    on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]),
-                    trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])
-                )
-                col.controls.append(create_card(list_tile, padding=5))
+                col.controls.append(create_card(content=ft.ListTile(leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY), title=ft.Text(a['nombre'], weight="bold"), subtitle=ft.Text(f"DNI: {a.get('dni','-')}"), on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]), trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])), padding=0))
             page.update()
         load()
         return ft.View("/curso", [
@@ -461,14 +451,15 @@ def main(page: ft.Page):
             except: show_snack("Fecha inválida.", DANGER); return
             ex = get_asistencia_diaria(state["curso_id"], dp.value); col.controls.clear(); vals.clear()
             for a in get_alumnos(state["curso_id"]):
-                dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], value=ex.get(a['id'], "P"), width=80, bgcolor="white", border_radius=8)
+                dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], value=ex.get(a['id'], "P"), width=80, bgcolor="white", border_radius=8, content_padding=10)
                 vals[a['id']] = dd
                 col.controls.append(create_card(content=ft.Row([ft.Text(a['nombre'], weight="bold", size=16, expand=True), dd], alignment="spaceBetween"), padding=10))
             page.update()
         def save(e):
             try:
                 d = date.fromisoformat(dp.value)
-                if d > date.today() or d.weekday() >= 5: return show_snack("Fecha no permitida", DANGER)
+                if d > date.today(): return show_snack("Fecha futura", DANGER)
+                if d.weekday() >= 5: return show_snack("Es fin de semana", DANGER)
             except: return show_snack("Fecha inválida", DANGER)
             for aid, dd in vals.items(): register_asistencia(aid, state["curso_id"], dp.value, dd.value)
             show_snack("Guardado"); page.go("/curso")
@@ -492,7 +483,7 @@ def main(page: ft.Page):
                     ft.DataCell(ft.Container(content=ft.Text(f"{d['faltas']}", color="white", weight="bold"), bgcolor=c if c==DANGER else "transparent", padding=5, border_radius=5)),
                     ft.DataCell(ft.Text(f"{d['pct']}%", color=c, weight="bold"))
                 ]))
-            dt = ft.DataTable(columns=[ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)], rows=rows, bgcolor="white", border_radius=10, column_spacing=15, heading_row_color="#E3F2FD")
+            dt = ft.DataTable(columns=[ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)], rows=rows, bgcolor="white", border_radius=10, column_spacing=15, heading_row_color="#E3F2FD", heading_row_height=40)
             table_cont.controls = [create_card(ft.Row([dt], scroll="always"), padding=0)]; page.update()
         
         def export(e):
@@ -661,8 +652,8 @@ def main(page: ft.Page):
 if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     if port_env:
-        print(f"🚀 NUBE: Puerto {port_env}")
+        # MODO NUBE (Render/Railway): Escuchar en 0.0.0.0
         ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        print("🏠 LOCAL: Iniciando...")
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550, host="127.0.0.1", web_renderer="html")
+        # MODO LOCAL (Tu PC): Automático, sin 'host' forzado
+        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550)
