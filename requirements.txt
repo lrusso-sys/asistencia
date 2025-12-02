@@ -1,7 +1,9 @@
-flet 
+flet
+sqlite
 pandas
 openpyxl
 xlsxwriter
+
 
 
 
