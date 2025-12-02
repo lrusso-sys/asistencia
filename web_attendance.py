@@ -219,6 +219,7 @@ def get_report_data(curso_id, start, end):
         })
     return report
 
+# --- Admin ---
 def get_users():
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Usuarios").fetchall()
@@ -259,6 +260,7 @@ def activar_ciclo(cid):
     conn.execute("UPDATE Ciclos SET activo = 1 WHERE id = ?", (cid,))
     conn.commit(); conn.close()
 
+# --- Requisitos (Documentación) ---
 def get_requisitos(cid):
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Requisitos WHERE curso_id=?", (cid,)).fetchall()
@@ -296,7 +298,7 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium)
+# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium Compatible)
 # ======================================================================
 
 def main(page: ft.Page):
@@ -534,7 +536,7 @@ def main(page: ft.Page):
 
     def student_detail_view():
         aid = state["st_view"]; s = get_alumno_by_id(aid)
-        if not s: return ft.View("/error", [ft.Text("Error")])
+        if not s: return ft.View("/error", [ft.Text("Error: Alumno no encontrado")])
         curso_data = get_curso_by_id(s['curso_id'])
         stats = get_student_stats(aid)
         reqs = get_student_req_status(aid, s['curso_id'])
@@ -563,11 +565,12 @@ def main(page: ft.Page):
             if rs: dd.value = rs[0]['descripcion']
             page.update(); lc()
         def lc():
-            col.controls.clear(); if not dd.value: return
+            col.controls.clear()
+            if not dd.value: return
             rid = rm[dd.value]; done = get_cumplimientos(rid)
             for a in get_alumnos(state["curso_id"]):
                 def on_chg(e, aid=a['id'], rid=rid): toggle_cumplimiento(rid, aid, e.control.value)
-                col.controls.append(create_card(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=on_chg), padding=10))
+                col.controls.append(create_card(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: on_chg(e, aid, rid)), padding=10))
             page.update()
         def add(e): page.go("/form_req")
         def dele(e): 
@@ -585,7 +588,7 @@ def main(page: ft.Page):
                 if is_edit: update_alumno(state["st_edit"], nm.value, dni.value, obs.value, tn.value, tt.value)
                 else: add_alumno(state["curso_id"], nm.value, dni.value, obs.value, tn.value, tt.value)
                 page.go("/curso")
-        return ft.View("/form_student", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Ficha"), bgcolor=PRIMARY, color="white"), ft.Container(content=create_card(ft.Column([ft.Text("Datos Alumno", size=18, weight="bold"), nm, dni, ft.Text("Datos Tutor", size=18, weight="bold"), tn, tt, ft.Text("Obs", size=18, weight="bold"), obs, ft.ElevatedButton("GUARDAR", on_click=save, bgcolor=SUCCESS, color="white", height=45, width=float("inf"))])), padding=20, bgcolor=BG_COLOR, expand=True)])
+        return ft.View("/form_student", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Ficha del Alumno"), bgcolor=PRIMARY, color="white"), ft.Container(content=create_card(ft.Column([ft.Text("Datos Alumno", size=18, weight="bold"), nm, dni, ft.Text("Datos Tutor", size=18, weight="bold"), tn, tt, ft.Text("Observaciones", size=18, weight="bold"), obs, ft.ElevatedButton("GUARDAR", on_click=save, bgcolor=SUCCESS, color="white", height=45, width=float("inf"))])), padding=20, bgcolor=BG_COLOR, expand=True)])
 
     def form_curso_view():
         tf = ft.TextField(label="Nombre Curso", bgcolor="white", border_radius=8)
@@ -652,8 +655,8 @@ def main(page: ft.Page):
 if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     if port_env:
-        # MODO NUBE (Render/Railway): Escuchar en 0.0.0.0
+        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
         ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # MODO LOCAL (Tu PC): Automático, sin 'host' forzado
+        # LOCAL: Automático
         ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550)
