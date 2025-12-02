@@ -48,8 +48,10 @@ def init_db():
 
     # Migración de columnas
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
-        try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
-        except: pass
+        try:
+            cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
+        except:
+            pass
 
     # Datos por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
@@ -75,7 +77,8 @@ def authenticate_user(username, password):
     pwd = hash_password(password)
     user = conn.execute("SELECT * FROM Usuarios WHERE username = ? AND password = ?", (username, pwd)).fetchone()
     conn.close()
-    if user: return True, user['role']
+    if user:
+        return True, user['role']
     return False, None
 
 def get_ciclo_activo():
@@ -92,7 +95,8 @@ def get_curso_by_id(cid):
 
 def get_cursos():
     ciclo = get_ciclo_activo()
-    if not ciclo: return []
+    if not ciclo:
+        return []
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Cursos WHERE ciclo_id = ? ORDER BY nombre", (ciclo['id'],)).fetchall()
     conn.close()
@@ -100,18 +104,22 @@ def get_cursos():
 
 def add_curso(nombre):
     ciclo = get_ciclo_activo()
-    if not ciclo: return False
+    if not ciclo:
+        return False
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Cursos (nombre, ciclo_id) VALUES (?, ?)", (nombre, ciclo['id']))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
-    except: return False
+    except:
+        return False
 
 def delete_curso(cid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Cursos WHERE id = ?", (cid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_alumnos(curso_id):
     conn = get_db_connection()
@@ -123,19 +131,23 @@ def add_alumno(cid, nombre, dni, obs, t_n, t_t):
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Alumnos (curso_id, nombre, dni, observaciones, tutor_nombre, tutor_telefono) VALUES (?,?,?,?,?,?)", (cid, nombre, dni, obs, t_n, t_t))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
-    except: return False
+    except:
+        return False
 
 def update_alumno(aid, nombre, dni, obs, t_n, t_t):
     conn = get_db_connection()
     conn.execute("UPDATE Alumnos SET nombre=?, dni=?, observaciones=?, tutor_nombre=?, tutor_telefono=? WHERE id=?", (nombre, dni, obs, t_n, t_t, aid))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def delete_alumno(aid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Alumnos WHERE id=?", (aid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_alumno_by_id(aid):
     conn = get_db_connection()
@@ -167,7 +179,8 @@ def get_asistencia_diaria(curso_id, fecha):
 def register_asistencia(aid, cid, fecha, status):
     conn = get_db_connection()
     conn.execute("INSERT OR REPLACE INTO Asistencia (alumno_id, fecha, status) VALUES (?, ?, ?)", (aid, fecha, status))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_student_attendance_history(aid):
     conn = get_db_connection()
@@ -200,7 +213,8 @@ def get_report_data(curso_id, start, end):
     asis_map = {} 
     for r in asistencias:
         aid = r['alumno_id']
-        if aid not in asis_map: asis_map[aid] = []
+        if aid not in asis_map:
+            asis_map[aid] = []
         asis_map[aid].append(r['status'])
         
     report = []
@@ -218,7 +232,6 @@ def get_report_data(curso_id, start, end):
         })
     return report
 
-# --- Admin ---
 def get_users():
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Usuarios").fetchall()
@@ -229,14 +242,17 @@ def add_user(u, p, r):
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", (u, hash_password(p), r))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
-    except: return False
+    except:
+        return False
 
 def delete_user(uid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Usuarios WHERE id = ?", (uid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_ciclos():
     conn = get_db_connection()
@@ -249,15 +265,18 @@ def add_ciclo(nombre):
         conn = get_db_connection()
         conn.execute("UPDATE Ciclos SET activo = 0") 
         conn.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (nombre,))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
-    except: return False
+    except:
+        return False
 
 def activar_ciclo(cid):
     conn = get_db_connection()
     conn.execute("UPDATE Ciclos SET activo = 0")
     conn.execute("UPDATE Ciclos SET activo = 1 WHERE id = ?", (cid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 # --- Requisitos (Documentación) ---
 def get_requisitos(cid):
@@ -269,12 +288,14 @@ def get_requisitos(cid):
 def add_requisito(cid, desc):
     conn = get_db_connection()
     conn.execute("INSERT INTO Requisitos (curso_id, descripcion) VALUES (?, ?)", (cid, desc))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def delete_requisito(rid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Requisitos WHERE id=?", (rid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_cumplimientos(rid):
     conn = get_db_connection()
@@ -284,9 +305,12 @@ def get_cumplimientos(rid):
 
 def toggle_cumplimiento(rid, aid, val):
     conn = get_db_connection()
-    if val: conn.execute("INSERT OR IGNORE INTO Requisitos_Cumplidos (requisito_id, alumno_id) VALUES (?, ?)", (rid, aid))
-    else: conn.execute("DELETE FROM Requisitos_Cumplidos WHERE requisito_id=? AND alumno_id=?", (rid, aid))
-    conn.commit(); conn.close()
+    if val:
+        conn.execute("INSERT OR IGNORE INTO Requisitos_Cumplidos (requisito_id, alumno_id) VALUES (?, ?)", (rid, aid))
+    else:
+        conn.execute("DELETE FROM Requisitos_Cumplidos WHERE requisito_id=? AND alumno_id=?", (rid, aid))
+    conn.commit()
+    conn.close()
 
 def get_student_req_status(aid, cid):
     reqs = get_requisitos(cid)
@@ -297,7 +321,7 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium)
+# 2. INTERFAZ GRÁFICA (Flet - Estilo Simple y Compatible)
 # ======================================================================
 
 def main(page: ft.Page):
@@ -305,16 +329,17 @@ def main(page: ft.Page):
     page.theme_mode = "light"
     page.padding = 0
     
-    # Colores Hex
-    PRIMARY = "#3F51B5"
-    SECONDARY = "#1A237E"
-    BG_COLOR = "#F5F7FB"
-    CARD_COLOR = "#FFFFFF"
-    DANGER = "#E53935"
-    SUCCESS = "#43A047"
+    # Definiciones de estilo simple para máxima compatibilidad
+    PRIMARY = "blue"
+    SECONDARY = "black"
+    BG_COLOR = "#F0F0F0" # Gris muy claro
+    CARD_COLOR = "white"
+    DANGER = "red"
+    SUCCESS = "green"
     
     init_db()
     
+    # Estado de la aplicación
     state = {
         "role": None, "username": None, 
         "curso_id": None, "curso_nombre": None, 
@@ -326,6 +351,7 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
+    # Componente: Tarjeta (simulada con Container)
     def create_card(content, padding=15, on_click=None):
         return ft.Container(
             content=content, padding=padding, bgcolor=CARD_COLOR, border_radius=8,
@@ -401,6 +427,7 @@ def main(page: ft.Page):
             page.update()
         
         def go_curso(cid, cn): state["curso_id"]=cid; state["curso_nombre"]=cn; page.go("/curso")
+        
         def add_c(e): 
             if ciclo: page.go("/form_curso")
             else: show_snack("Falta Ciclo Activo", DANGER)
