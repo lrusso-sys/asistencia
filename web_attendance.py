@@ -7,7 +7,6 @@ import base64
 import io
 
 # --- LIBRERÍAS OPCIONALES ---
-# NOTA: Necesitas instalar 'pandas' y 'xlsxwriter' para la función de exportación a Excel.
 try:
     import pandas as pd
 except ImportError:
@@ -47,12 +46,12 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
 
-    # Migración de columnas (para asegurar compatibilidad con versiones antiguas)
+    # Migración de columnas
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
 
-    # Usuario y Ciclo por defecto
+    # Datos por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
@@ -105,14 +104,16 @@ def add_curso(nombre):
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Cursos (nombre, ciclo_id) VALUES (?, ?)", (nombre, ciclo['id']))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
     except: return False
 
 def delete_curso(cid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Cursos WHERE id = ?", (cid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_alumnos(curso_id):
     conn = get_db_connection()
@@ -124,19 +125,22 @@ def add_alumno(cid, nombre, dni, obs, t_n, t_t):
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Alumnos (curso_id, nombre, dni, observaciones, tutor_nombre, tutor_telefono) VALUES (?,?,?,?,?,?)", (cid, nombre, dni, obs, t_n, t_t))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
     except: return False
 
 def update_alumno(aid, nombre, dni, obs, t_n, t_t):
     conn = get_db_connection()
     conn.execute("UPDATE Alumnos SET nombre=?, dni=?, observaciones=?, tutor_nombre=?, tutor_telefono=? WHERE id=?", (nombre, dni, obs, t_n, t_t, aid))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def delete_alumno(aid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Alumnos WHERE id=?", (aid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_alumno_by_id(aid):
     conn = get_db_connection()
@@ -168,7 +172,8 @@ def get_asistencia_diaria(curso_id, fecha):
 def register_asistencia(aid, cid, fecha, status):
     conn = get_db_connection()
     conn.execute("INSERT OR REPLACE INTO Asistencia (alumno_id, fecha, status) VALUES (?, ?, ?)", (aid, fecha, status))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_student_attendance_history(aid):
     conn = get_db_connection()
@@ -229,14 +234,16 @@ def add_user(u, p, r):
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", (u, hash_password(p), r))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
     except: return False
 
 def delete_user(uid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Usuarios WHERE id = ?", (uid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_ciclos():
     conn = get_db_connection()
@@ -249,7 +256,8 @@ def add_ciclo(nombre):
         conn = get_db_connection()
         conn.execute("UPDATE Ciclos SET activo = 0") 
         conn.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (nombre,))
-        conn.commit(); conn.close()
+        conn.commit()
+        conn.close()
         return True
     except: return False
 
@@ -257,9 +265,9 @@ def activar_ciclo(cid):
     conn = get_db_connection()
     conn.execute("UPDATE Ciclos SET activo = 0")
     conn.execute("UPDATE Ciclos SET activo = 1 WHERE id = ?", (cid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
-# --- Requisitos ---
 def get_requisitos(cid):
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Requisitos WHERE curso_id=?", (cid,)).fetchall()
@@ -269,12 +277,14 @@ def get_requisitos(cid):
 def add_requisito(cid, desc):
     conn = get_db_connection()
     conn.execute("INSERT INTO Requisitos (curso_id, descripcion) VALUES (?, ?)", (cid, desc))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def delete_requisito(rid):
     conn = get_db_connection()
     conn.execute("DELETE FROM Requisitos WHERE id=?", (rid,))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_cumplimientos(rid):
     conn = get_db_connection()
@@ -286,7 +296,8 @@ def toggle_cumplimiento(rid, aid, val):
     conn = get_db_connection()
     if val: conn.execute("INSERT OR IGNORE INTO Requisitos_Cumplidos (requisito_id, alumno_id) VALUES (?, ?)", (rid, aid))
     else: conn.execute("DELETE FROM Requisitos_Cumplidos WHERE requisito_id=? AND alumno_id=?", (rid, aid))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 def get_student_req_status(aid, cid):
     reqs = get_requisitos(cid)
@@ -618,7 +629,7 @@ def main(page: ft.Page):
         def add(e): 
             if tf.value: add_ciclo(tf.value); tf.value=""; ld()
         ld()
-        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor=PRIMARY, color="white"), ft.Container(content=ft.Column([create_card(ft.Row([tf, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color=DANGER, on_click=dele)])), ft.Container(height=20), col]), padding=20, bgcolor=BG_COLOR, expand=True)]) # Fix: Removed redundant delete button here which was not defined
+        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor=PRIMARY, color="white"), ft.Container(content=ft.Column([create_card(ft.Row([tf, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color=DANGER, on_click=dele)])), ft.Container(height=20), col]), padding=20, bgcolor=BG_COLOR, expand=True)])
 
     def users_view():
         u = ft.TextField(label="User", expand=True, bgcolor="white", border_radius=8); p = ft.TextField(label="Pass", password=True, expand=True, bgcolor="white", border_radius=8); r = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=100, bgcolor="white", border_radius=8); col = ft.Column()
@@ -652,10 +663,13 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
+    # CONFIGURACIÓN DE ARRANQUE PARA RENDER
     port_env = os.environ.get("PORT")
+    
     if port_env:
-        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
-        ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render)
+        # Usamos view=None para no intentar abrir navegador en el servidor
+        ft.app(target=main, view=None, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # LOCAL: Automático
+        # LOCAL: Automático (abre navegador)
         ft.app(target=main, view=ft.WEB_BROWSER, port=8550)
