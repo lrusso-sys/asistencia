@@ -1,10 +1,6 @@
 flet
-sqlite
 pandas
 openpyxl
 xlsxwriter
-
-
-
 
 
