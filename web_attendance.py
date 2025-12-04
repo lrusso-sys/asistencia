@@ -5,18 +5,23 @@ from datetime import date
 import os
 import base64
 import io
+import sys
+import traceback
 
 # --- LIBRERÍAS OPCIONALES ---
+print("--- Iniciando carga de librerías ---", flush=True)
 try:
     import pandas as pd
+    print("Pandas cargado correctamente.", flush=True)
 except ImportError:
     pd = None
-    print("⚠️ Pandas no instalado. La exportación a Excel estará deshabilitada.")
+    print("⚠️ Pandas no instalado.", flush=True)
 
 try:
     import xlsxwriter
+    print("XlsxWriter cargado correctamente.", flush=True)
 except ImportError:
-    print("⚠️ XlsxWriter no instalado. La exportación a Excel estará deshabilitada.")
+    print("⚠️ XlsxWriter no instalado.", flush=True)
 
 # ======================================================================
 # 1. BASE DE DATOS (SQLite Local)
@@ -34,39 +39,45 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Tablas
-    cursor.execute("CREATE TABLE IF NOT EXISTS Usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Ciclos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, activo INTEGER DEFAULT 0)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, ciclo_id INTEGER, FOREIGN KEY (ciclo_id) REFERENCES Ciclos(id) ON DELETE CASCADE)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Alumnos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, nombre TEXT NOT NULL, dni TEXT, observaciones TEXT, tutor_nombre TEXT, tutor_telefono TEXT, UNIQUE(curso_id, nombre), FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Asistencia (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL, status TEXT NOT NULL, UNIQUE(alumno_id, fecha), FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
+    print(f"Intentando inicializar base de datos en: {os.path.abspath(DB_NAME)}", flush=True)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Tablas
+        cursor.execute("CREATE TABLE IF NOT EXISTS Usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Ciclos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, activo INTEGER DEFAULT 0)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, ciclo_id INTEGER, FOREIGN KEY (ciclo_id) REFERENCES Ciclos(id) ON DELETE CASCADE)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Alumnos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, nombre TEXT NOT NULL, dni TEXT, observaciones TEXT, tutor_nombre TEXT, tutor_telefono TEXT, UNIQUE(curso_id, nombre), FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Asistencia (id INTEGER PRIMARY KEY AUTOINCREMENT, alumno_id INTEGER NOT NULL, fecha TEXT NOT NULL, status TEXT NOT NULL, UNIQUE(alumno_id, fecha), FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
 
-    # Migraciones
-    for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
-        try:
-            cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
-        except:
-            pass
+        # Migraciones
+        for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
+            try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
+            except: pass
 
-    # Datos por defecto
-    cursor.execute("SELECT COUNT(*) FROM Usuarios")
-    if cursor.fetchone()[0] == 0:
-        cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
-    
-    cursor.execute("SELECT COUNT(*) FROM Ciclos")
-    if cursor.fetchone()[0] == 0:
-        anio = str(date.today().year)
-        cursor.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (anio,))
-        cid = cursor.lastrowid
-        cursor.execute("UPDATE Cursos SET ciclo_id = ? WHERE ciclo_id IS NULL", (cid,))
+        # Datos por defecto
+        cursor.execute("SELECT COUNT(*) FROM Usuarios")
+        if cursor.fetchone()[0] == 0:
+            print("Creando usuario admin por defecto...", flush=True)
+            cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
+        
+        cursor.execute("SELECT COUNT(*) FROM Ciclos")
+        if cursor.fetchone()[0] == 0:
+            print("Creando ciclo lectivo inicial...", flush=True)
+            anio = str(date.today().year)
+            cursor.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (anio,))
+            cid = cursor.lastrowid
+            cursor.execute("UPDATE Cursos SET ciclo_id = ? WHERE ciclo_id IS NULL", (cid,))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+        conn.close()
+        print("Base de datos inicializada con éxito.", flush=True)
+    except Exception as e:
+        print(f"ERROR CRÍTICO al inicializar DB: {e}", flush=True)
+        traceback.print_exc()
 
 # ======================================================================
 # FUNCIONES CRUD
@@ -85,22 +96,17 @@ def get_ciclo_activo():
     conn = get_db_connection()
     row = conn.execute("SELECT * FROM Ciclos WHERE activo = 1").fetchone()
     conn.close()
-    if row:
-        return dict(row)
-    return None
+    return dict(row) if row else None
 
 def get_curso_by_id(cid):
     conn = get_db_connection()
     row = conn.execute("SELECT c.*, ci.nombre as ciclo_nombre FROM Cursos c JOIN Ciclos ci ON c.ciclo_id = ci.id WHERE c.id = ?", (cid,)).fetchone()
     conn.close()
-    if row:
-        return dict(row)
-    return None
+    return dict(row) if row else None
 
 def get_cursos():
     ciclo = get_ciclo_activo()
-    if not ciclo:
-        return []
+    if not ciclo: return []
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Cursos WHERE ciclo_id = ? ORDER BY nombre", (ciclo['id'],)).fetchall()
     conn.close()
@@ -108,16 +114,14 @@ def get_cursos():
 
 def add_curso(nombre):
     ciclo = get_ciclo_activo()
-    if not ciclo:
-        return False
+    if not ciclo: return False
     try:
         conn = get_db_connection()
         conn.execute("INSERT INTO Cursos (nombre, ciclo_id) VALUES (?, ?)", (nombre, ciclo['id']))
         conn.commit()
         conn.close()
         return True
-    except:
-        return False
+    except: return False
 
 def delete_curso(cid):
     conn = get_db_connection()
@@ -139,8 +143,7 @@ def add_alumno(cid, nombre, dni, obs, t_n, t_t):
         conn.commit()
         conn.close()
         return True
-    except:
-        return False
+    except: return False
 
 def update_alumno(aid, nombre, dni, obs, t_n, t_t):
     conn = get_db_connection()
@@ -159,9 +162,7 @@ def get_alumno_by_id(aid):
     conn = get_db_connection()
     row = conn.execute("SELECT * FROM Alumnos WHERE id = ?", (aid,)).fetchone()
     conn.close()
-    if row:
-        return dict(row)
-    return None
+    return dict(row) if row else None
 
 def search_students(term):
     conn = get_db_connection()
@@ -200,16 +201,11 @@ def get_student_stats(aid):
     conn = get_db_connection()
     rows = conn.execute("SELECT status FROM Asistencia WHERE alumno_id = ?", (aid,)).fetchall()
     conn.close()
-    
     statuses = [r['status'] for r in rows]
     counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
-    
     faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
     total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
-    pct = 0
-    if total > 0:
-        pct = (faltas/total*100)
-    
+    pct = (faltas/total*100) if total > 0 else 0
     return {
         'presentes': counts['P'], 'tardes': counts['T'], 'ausentes': counts['A'],
         'justificadas': counts['J'], 'suspensiones': counts['S'],
@@ -236,9 +232,7 @@ def get_report_data(curso_id, start, end):
         counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
         faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
         total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
-        pct = 0
-        if total > 0:
-            pct = (faltas/total*100)
+        pct = (faltas/total*100) if total > 0 else 0
         
         report.append({
             'nombre': a['nombre'], 'dni': a['dni'], 
@@ -262,8 +256,7 @@ def add_user(u, p, r):
         conn.commit()
         conn.close()
         return True
-    except:
-        return False
+    except: return False
 
 def delete_user(uid):
     conn = get_db_connection()
@@ -285,8 +278,7 @@ def add_ciclo(nombre):
         conn.commit()
         conn.close()
         return True
-    except:
-        return False
+    except: return False
 
 def activar_ciclo(cid):
     conn = get_db_connection()
@@ -342,6 +334,7 @@ def get_student_req_status(aid, cid):
 # ======================================================================
 
 def main(page: ft.Page):
+    print("--- Iniciando Main Flet App ---", flush=True)
     page.title = "Sistema de Asistencia UNSAM"
     page.theme_mode = "light"
     page.padding = 0
@@ -354,7 +347,10 @@ def main(page: ft.Page):
     DANGER = "#E53935"
     SUCCESS = "#43A047"
     
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Error fatal en init_db: {e}", flush=True)
     
     state = {
         "role": None, "username": None, 
@@ -381,12 +377,14 @@ def main(page: ft.Page):
         pwd = ft.TextField(label="Clave", password=True, width=300, bgcolor="white", border_radius=8, border_color=PRIMARY)
         
         def login(e):
+            print(f"Intento de login usuario: {user.value}", flush=True)
             ok, role = authenticate_user(user.value, pwd.value)
             if ok:
-                state["role"] = role
-                state["username"] = user.value
+                print("Login Exitoso", flush=True)
+                state["role"], state["username"] = role, user.value
                 page.go("/dashboard")
             else:
+                print("Login Fallido", flush=True)
                 show_snack("Datos incorrectos", DANGER)
         
         return ft.View("/", [
@@ -397,13 +395,7 @@ def main(page: ft.Page):
                     ft.Text("UNSAM", size=18, color="grey"),
                     ft.Divider(height=30, color="transparent"),
                     ft.Container(
-                        content=ft.Column([
-                            user, 
-                            ft.Container(height=10), 
-                            pwd, 
-                            ft.Container(height=20), 
-                            ft.ElevatedButton("INGRESAR", on_click=login, width=300, height=50, bgcolor=PRIMARY, color="white")
-                        ]),
+                        content=ft.Column([user, ft.Container(height=10), pwd, ft.Container(height=20), ft.ElevatedButton("INGRESAR", on_click=login, width=300, height=50, bgcolor=PRIMARY, color="white")]),
                         padding=40, bgcolor="white", border_radius=20,
                         shadow=ft.BoxShadow(blur_radius=20, color="#0000001A")
                     ),
@@ -420,9 +412,7 @@ def main(page: ft.Page):
         search = ft.TextField(hint_text="Buscar alumno...", expand=True, bgcolor="white", border_radius=20, border_color="transparent")
         
         def do_search(e): 
-            if search.value: 
-                state["search"] = search.value
-                page.go("/search")
+            if search.value: state["search"] = search.value; page.go("/search")
         search.on_submit = do_search
         
         cursos_col = ft.Column(scroll="auto", expand=True)
@@ -434,11 +424,8 @@ def main(page: ft.Page):
                 cursos_col.controls.append(ft.Text("No hay cursos activos.", italic=True, color="grey"))
             
             for c in cursos:
-                def create_click(cid, cn):
-                    return lambda e: go_curso(cid, cn)
-                
-                def create_del(cid):
-                    return lambda e: (delete_curso(cid), load())
+                def create_click(cid, cn): return lambda e: go_curso(cid, cn)
+                def create_del(cid): return lambda e: (delete_curso(cid), load())
 
                 action_row = ft.Row([
                     ft.IconButton("arrow_forward", icon_color=PRIMARY, on_click=create_click(c['id'], c['nombre'])),
@@ -448,25 +435,16 @@ def main(page: ft.Page):
 
                 cursos_col.controls.append(create_card(
                     content=ft.Row([
-                        ft.Row([
-                            ft.Container(content=ft.Icon("class", color="white"), bgcolor=PRIMARY, border_radius=10, padding=10),
-                            ft.Text(c['nombre'], weight="bold", size=18, color=SECONDARY)
-                        ]),
+                        ft.Row([ft.Container(content=ft.Icon("class", color="white"), bgcolor=PRIMARY, border_radius=10, padding=10), ft.Text(c['nombre'], weight="bold", size=18, color=SECONDARY)]),
                         action_row
                     ], alignment="spaceBetween")
                 ))
             page.update()
         
-        def go_curso(cid, cn):
-            state["curso_id"] = cid
-            state["curso_nombre"] = cn
-            page.go("/curso")
-        
+        def go_curso(cid, cn): state["curso_id"]=cid; state["curso_nombre"]=cn; page.go("/curso")
         def add_c(e): 
-            if ciclo:
-                page.go("/form_curso")
-            else:
-                show_snack("Falta Ciclo Activo", DANGER)
+            if ciclo: page.go("/form_curso")
+            else: show_snack("Falta Ciclo Activo", DANGER)
 
         load()
         admin_btn = ft.IconButton("settings", icon_color="white", on_click=lambda _: page.go("/admin")) if state["role"] == 'admin' else ft.Container()
@@ -476,8 +454,7 @@ def main(page: ft.Page):
             ft.Container(content=ft.Column([
                 ft.Container(content=ft.Row([ft.Text(f"Ciclo: {c_nombre}", color=PRIMARY, weight="bold"), ft.Container(content=search, width=300)], alignment="spaceBetween"), padding=ft.padding.only(bottom=20)),
                 ft.Row([ft.Text("Mis Cursos", size=24, weight="bold", color=SECONDARY), ft.ElevatedButton("Nuevo Curso", icon="add", bgcolor=SUCCESS, color="white", on_click=add_c)], alignment="spaceBetween"),
-                ft.Container(height=10), 
-                cursos_col
+                ft.Container(height=10), cursos_col
             ]), padding=30, bgcolor=BG_COLOR, expand=True)
         ])
 
@@ -486,29 +463,12 @@ def main(page: ft.Page):
         def load():
             col.controls.clear()
             alumnos = get_alumnos(state["curso_id"])
-            if not alumnos:
-                col.controls.append(ft.Text("No hay alumnos.", italic=True, color="grey"))
-            
+            if not alumnos: col.controls.append(ft.Text("No hay alumnos.", italic=True, color="grey"))
             for a in alumnos:
-                def go_det(aid, cid):
-                    state["st_view"] = aid
-                    state["curso_id"] = cid
-                    page.go("/student_detail")
-                
-                def edit_clk(aid):
-                    return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
-                
-                def del_clk(aid):
-                    return lambda e: (delete_alumno(aid), load())
-                
-                list_tile = ft.ListTile(
-                    leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY),
-                    title=ft.Text(a['nombre'], weight="bold"),
-                    subtitle=ft.Text(f"DNI: {a.get('dni','-')}"),
-                    on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]),
-                    trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])
-                )
-                col.controls.append(create_card(list_tile, padding=5))
+                def go_det(aid, cid): state["st_view"] = aid; state["curso_id"] = cid; page.go("/student_detail")
+                def edit_clk(aid): return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
+                def del_clk(aid): return lambda e: (delete_alumno(aid), load())
+                col.controls.append(create_card(content=ft.ListTile(leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY), title=ft.Text(a['nombre'], weight="bold"), subtitle=ft.Text(f"DNI: {a.get('dni','-')}"), on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]), trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])), padding=0))
             page.update()
         load()
         return ft.View("/curso", [
@@ -520,49 +480,31 @@ def main(page: ft.Page):
                     ft.ElevatedButton("Reportes", icon="bar_chart", height=50, on_click=lambda _: page.go("/reportes"), bgcolor="#00897B", color="white", expand=True)
                 ], spacing=10), padding=ft.padding.only(bottom=20)),
                 ft.Row([ft.Text("Alumnos", size=22, weight="bold", color=SECONDARY), ft.IconButton("person_add", icon_color="white", bgcolor=SUCCESS, on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))], alignment="spaceBetween"),
-                ft.Container(height=10), 
-                col
+                ft.Container(height=10), col
             ]), padding=20, bgcolor=BG_COLOR, expand=True)
         ])
 
     def asistencia_view():
         dp = ft.TextField(label="Fecha (AAAA-MM-DD)", value=date.today().isoformat(), bgcolor="white", border_radius=10)
-        col = ft.Column(scroll="auto", expand=True)
-        vals = {}
-        
+        col = ft.Column(scroll="auto", expand=True); vals = {}
         def load(e=None):
             try: 
-                if date.fromisoformat(dp.value).weekday() >= 5:
-                    show_snack("⚠️ Es fin de semana.", "orange")
-            except:
-                show_snack("Fecha inválida.", DANGER)
-                return
-            
-            ex = get_asistencia_diaria(state["curso_id"], dp.value)
-            col.controls.clear()
-            vals.clear()
-            
+                if date.fromisoformat(dp.value).weekday() >= 5: show_snack("⚠️ Es fin de semana.", "orange")
+            except: show_snack("Fecha inválida.", DANGER); return
+            ex = get_asistencia_diaria(state["curso_id"], dp.value); col.controls.clear(); vals.clear()
             for a in get_alumnos(state["curso_id"]):
-                dd = ft.Dropdown(
-                    options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], 
-                    value=ex.get(a['id'], "P"), 
-                    width=80, bgcolor="white", border_radius=8, content_padding=10
-                )
+                dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], value=ex.get(a['id'], "P"), width=80, bgcolor="white", border_radius=8, content_padding=10)
                 vals[a['id']] = dd
                 col.controls.append(create_card(content=ft.Row([ft.Text(a['nombre'], weight="bold", size=16, expand=True), dd], alignment="spaceBetween"), padding=10))
             page.update()
-            
         def save(e):
             try:
                 d = date.fromisoformat(dp.value)
                 if d > date.today(): return show_snack("Fecha futura", DANGER)
                 if d.weekday() >= 5: return show_snack("Es fin de semana", DANGER)
             except: return show_snack("Fecha inválida", DANGER)
-            
             for aid, dd in vals.items(): register_asistencia(aid, state["curso_id"], dp.value, dd.value)
-            show_snack("Guardado")
-            page.go("/curso")
-        
+            show_snack("Guardado"); page.go("/curso")
         load()
         return ft.View("/asistencia", [
             ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Tomar Asistencia"), bgcolor=PRIMARY, color="white"),
@@ -573,10 +515,8 @@ def main(page: ft.Page):
         d1 = ft.TextField(label="Desde", value=date.today().replace(day=1).isoformat(), width=130, bgcolor="white", border_radius=8)
         d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white", border_radius=8)
         table_cont = ft.Column(scroll="auto", expand=True)
-        
         def gen(e):
-            data = get_report_data(state["curso_id"], d1.value, d2.value)
-            rows = []
+            data = get_report_data(state["curso_id"], d1.value, d2.value); rows = []
             for d in data:
                 c = DANGER if d['faltas']>=25 else "black"
                 rows.append(ft.DataRow(cells=[
@@ -585,28 +525,15 @@ def main(page: ft.Page):
                     ft.DataCell(ft.Container(content=ft.Text(f"{d['faltas']}", color="white", weight="bold"), bgcolor=c if c==DANGER else "transparent", padding=5, border_radius=5)),
                     ft.DataCell(ft.Text(f"{d['pct']}%", color=c, weight="bold"))
                 ]))
-            
-            dt = ft.DataTable(
-                columns=[
-                    ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), 
-                    ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), 
-                    ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)
-                ], 
-                rows=rows, bgcolor="white", border_radius=10, column_spacing=15, heading_row_color="#E3F2FD", heading_row_height=40
-            )
-            table_cont.controls = [create_card(ft.Row([dt], scroll="always"), padding=0)]
-            page.update()
+            dt = ft.DataTable(columns=[ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)], rows=rows, bgcolor="white", border_radius=10, column_spacing=15, heading_row_color="#E3F2FD", heading_row_height=40)
+            table_cont.controls = [create_card(ft.Row([dt], scroll="always"), padding=0)]; page.update()
         
         def export(e):
             if not pd: return show_snack("Falta pandas", DANGER)
             data = get_report_data(state["curso_id"], d1.value, d2.value)
             if not data: return show_snack("Sin datos", "orange")
-            
             df = pd.DataFrame(data).rename(columns={'nombre':'Alumno', 'p':'Pres', 't':'Tarde', 'a':'Aus', 'j':'Just', 's':'Susp', 'faltas':'Total', 'pct':'%'})
-            
-            output = io.BytesIO()
-            df.to_excel(output, index=False, engine='xlsxwriter')
-            b64 = base64.b64encode(output.getvalue()).decode()
+            output = io.BytesIO(); df.to_excel(output, index=False, engine='xlsxwriter'); b64 = base64.b64encode(output.getvalue()).decode()
             page.launch_url(f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}", web_window_name="reporte.xlsx")
 
         return ft.View("/reportes", [
@@ -615,23 +542,13 @@ def main(page: ft.Page):
         ])
 
     def search_view():
-        term = state["search"]
-        res = search_students(term)
-        col = ft.Column(scroll="auto")
+        term = state["search"]; res = search_students(term); col = ft.Column(scroll="auto")
         if not res: col.controls.append(ft.Text("Sin resultados", color="grey", size=16))
         else:
             for r in res:
-                def go_det(s): 
-                    state["st_view"] = s['id']
-                    state["curso_id"] = s['curso_id']
-                    page.go("/student_detail")
-                
+                def go_det(s): state["st_view"] = s['id']; state["curso_id"] = s['curso_id']; page.go("/student_detail")
                 col.controls.append(create_card(content=ft.ListTile(leading=ft.Icon("person", color=PRIMARY, size=30), title=ft.Text(r['nombre'], weight="bold"), subtitle=ft.Text(f"Curso: {r['curso_nombre']} ({r['ciclo_nombre']})"), on_click=lambda e, s=r: go_det(s), trailing=ft.Icon("chevron_right", color="grey"))))
-        
-        return ft.View("/search", [
-            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(f"Búsqueda: {term}"), bgcolor=PRIMARY, color="white"), 
-            ft.Container(content=col, padding=20, bgcolor=BG_COLOR, expand=True)
-        ])
+        return ft.View("/search", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(f"Búsqueda: {term}"), bgcolor=PRIMARY, color="white"), ft.Container(content=col, padding=20, bgcolor=BG_COLOR, expand=True)])
 
     def export_student_ficha(page, alumno, curso_data, stats, requisitos):
         if not pd: return show_snack("Error: 'pandas' no instalado.", DANGER)
@@ -682,47 +599,24 @@ def main(page: ft.Page):
     def pedidos_view():
         dd = ft.Dropdown(label="Pedido", expand=True, bgcolor="white", on_change=lambda e: lc(), border_radius=8)
         col = ft.Column(scroll="auto", expand=True); rm = {}
-        
         def lr():
-            rs = get_requisitos(state["curso_id"])
-            rm.clear()
-            dd.options.clear()
-            for r in rs: 
-                rm[r['descripcion']] = r['id']
-                dd.options.append(ft.dropdown.Option(r['descripcion']))
+            rs = get_requisitos(state["curso_id"]); rm.clear(); dd.options.clear()
+            for r in rs: rm[r['descripcion']] = r['id']; dd.options.append(ft.dropdown.Option(r['descripcion']))
             if rs: dd.value = rs[0]['descripcion']
-            page.update()
-            lc()
-            
+            page.update(); lc()
         def lc():
             col.controls.clear()
             if not dd.value: return
-            rid = rm[dd.value]
-            done = get_cumplimientos(rid)
+            rid = rm[dd.value]; done = get_cumplimientos(rid)
             for a in get_alumnos(state["curso_id"]):
-                def on_chg(e, aid=a['id'], rid=rid): 
-                    toggle_cumplimiento(rid, aid, e.control.value)
-                
-                col.controls.append(create_card(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=on_chg), padding=10))
+                def on_chg(e, aid=a['id'], rid=rid): toggle_cumplimiento(rid, aid, e.control.value)
+                col.controls.append(create_card(content=ft.Checkbox(label=a['nombre'], value=(a['id'] in done), on_change=lambda e, aid=a['id'], rid=rid: on_chg(e, aid, rid)), padding=10))
             page.update()
-            
         def add(e): page.go("/form_req")
         def dele(e): 
-            if dd.value: 
-                delete_requisito(rm[dd.value])
-                lr()
-                show_snack("Eliminado", DANGER)
-                
+            if dd.value: delete_requisito(rm[dd.value]); lr(); show_snack("Eliminado", DANGER)
         lr()
-        return ft.View("/pedidos", [
-            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Documentación"), bgcolor=PRIMARY, color="white"), 
-            ft.Container(content=ft.Column([
-                create_card(ft.Row([dd, ft.IconButton("add", on_click=add, icon_color=PRIMARY), ft.IconButton("delete", icon_color=DANGER, on_click=dele)])), 
-                ft.Divider(color="transparent"), 
-                ft.Text("Marcar entregas:", weight="bold"), 
-                col
-            ]), padding=20, bgcolor=BG_COLOR, expand=True)
-        ])
+        return ft.View("/pedidos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Documentación"), bgcolor=PRIMARY, color="white"), ft.Container(content=ft.Column([create_card(ft.Row([dd, ft.IconButton("add", on_click=add, icon_color=PRIMARY), ft.IconButton("delete", icon_color=DANGER, on_click=dele)])), ft.Divider(color="transparent"), ft.Text("Marcar entregas:", weight="bold"), col]), padding=20, bgcolor=BG_COLOR, expand=True)])
 
     def form_student_view():
         is_edit = state["st_edit"] is not None
@@ -747,19 +641,7 @@ def main(page: ft.Page):
         tf = ft.TextField(label="Descripción", bgcolor="white", border_radius=8)
         def save(e):
             if tf.value: add_requisito(state["curso_id"], tf.value); page.go("/pedidos")
-        return ft.View("/form_req", [
-            ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Requisito"), bgcolor=PRIMARY, color="white"), 
-            ft.Container(
-                content=create_card(ft.Column([
-                    ft.Text("Documento a solicitar:", color="grey"), 
-                    tf, 
-                    ft.ElevatedButton("CREAR", on_click=save, bgcolor=SUCCESS, color="white", height=45, width=float("inf"))
-                ])), 
-                padding=20, 
-                bgcolor=BG_COLOR, 
-                expand=True
-            )
-        ])
+        return ft.View("/form_req", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/pedidos")), title=ft.Text("Nuevo Requisito"), bgcolor=PRIMARY, color="white"), ft.Container(content=create_card(ft.Column([ft.Text("Documento a solicitar:", color="grey"), tf, ft.ElevatedButton("CREAR", on_click=save, bgcolor=SUCCESS, color="white", height=45, width=float("inf"))])), padding=20, bgcolor=BG_COLOR, expand=True)])
 
     def admin_view():
         if state["role"]!='admin': return ft.View("/admin", [ft.AppBar(title=ft.Text("Error"), bgcolor=DANGER), ft.Text("Acceso Denegado")])
@@ -811,11 +693,11 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
+    print("--- INICIANDO APP ---")
     port_env = os.environ.get("PORT")
     if port_env:
-        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
-        # Usamos view=None para no intentar abrir navegador en el servidor
-        ft.app(target=main, view=None, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        print(f"Modo NUBE detectado. Puerto: {port_env}")
+        ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0")
     else:
-        # LOCAL: Automático
+        print("Modo LOCAL detectado.")
         ft.app(target=main, view=ft.WEB_BROWSER, port=8550)
