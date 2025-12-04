@@ -11,12 +11,12 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
-    print("⚠️ Pandas no instalado. La exportación a Excel estará deshabilitada.")
+    print("⚠️ Pandas no instalado.")
 
 try:
     import xlsxwriter
 except ImportError:
-    print("⚠️ XlsxWriter no instalado. La exportación a Excel estará deshabilitada.")
+    print("⚠️ XlsxWriter no instalado.")
 
 # ======================================================================
 # 1. BASE DE DATOS (SQLite Local)
@@ -48,8 +48,10 @@ def init_db():
 
     # Migración de columnas
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
-        try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
-        except: pass
+        try:
+            cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
+        except:
+            pass
 
     # Datos por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
@@ -192,7 +194,6 @@ def get_student_stats(aid):
     conn = get_db_connection()
     rows = conn.execute("SELECT status FROM Asistencia WHERE alumno_id = ?", (aid,)).fetchall()
     conn.close()
-    
     statuses = [r['status'] for r in rows]
     counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
     
@@ -326,11 +327,11 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet)
+# 2. INTERFAZ GRÁFICA (Flet - Diseño Premium)
 # ======================================================================
 
 def main(page: ft.Page):
-    page.title = "Asistencia UNSAM"
+    page.title = "Sistema de Asistencia UNSAM"
     page.theme_mode = "light"
     page.padding = 0
     
@@ -342,10 +343,7 @@ def main(page: ft.Page):
     DANGER = "#E53935"
     SUCCESS = "#43A047"
     
-    try:
-        init_db()
-    except Exception as e:
-        print(f"Error DB: {e}")
+    init_db()
     
     state = {
         "role": None, "username": None, 
@@ -404,7 +402,9 @@ def main(page: ft.Page):
         search = ft.TextField(hint_text="Buscar alumno...", expand=True, bgcolor="white", border_radius=20, border_color="transparent")
         
         def do_search(e): 
-            if search.value: state["search"] = search.value; page.go("/search")
+            if search.value: 
+                state["search"] = search.value
+                page.go("/search")
         search.on_submit = do_search
         
         cursos_col = ft.Column(scroll="auto", expand=True)
@@ -412,11 +412,15 @@ def main(page: ft.Page):
         def load():
             cursos_col.controls.clear()
             cursos = get_cursos()
-            if not cursos: cursos_col.controls.append(ft.Text("No hay cursos activos.", italic=True, color="grey"))
+            if not cursos:
+                cursos_col.controls.append(ft.Text("No hay cursos activos.", italic=True, color="grey"))
             
             for c in cursos:
-                def create_click(cid, cn): return lambda e: go_curso(cid, cn)
-                def create_del(cid): return lambda e: (delete_curso(cid), load())
+                def create_click(cid, cn):
+                    return lambda e: go_curso(cid, cn)
+                
+                def create_del(cid):
+                    return lambda e: (delete_curso(cid), load())
 
                 action_row = ft.Row([
                     ft.IconButton("arrow_forward", icon_color=PRIMARY, on_click=create_click(c['id'], c['nombre'])),
@@ -432,10 +436,16 @@ def main(page: ft.Page):
                 ))
             page.update()
         
-        def go_curso(cid, cn): state["curso_id"]=cid; state["curso_nombre"]=cn; page.go("/curso")
+        def go_curso(cid, cn):
+            state["curso_id"] = cid
+            state["curso_nombre"] = cn
+            page.go("/curso")
+        
         def add_c(e): 
-            if ciclo: page.go("/form_curso")
-            else: show_snack("Falta Ciclo Activo", DANGER)
+            if ciclo:
+                page.go("/form_curso")
+            else:
+                show_snack("Falta Ciclo Activo", DANGER)
 
         load()
         admin_btn = ft.IconButton("settings", icon_color="white", on_click=lambda _: page.go("/admin")) if state["role"] == 'admin' else ft.Container()
@@ -454,11 +464,20 @@ def main(page: ft.Page):
         def load():
             col.controls.clear()
             alumnos = get_alumnos(state["curso_id"])
-            if not alumnos: col.controls.append(ft.Text("No hay alumnos.", italic=True, color="grey"))
+            if not alumnos:
+                col.controls.append(ft.Text("No hay alumnos.", italic=True, color="grey"))
+            
             for a in alumnos:
-                def go_det(aid, cid): state["st_view"] = aid; state["curso_id"] = cid; page.go("/student_detail")
-                def edit_clk(aid): return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
-                def del_clk(aid): return lambda e: (delete_alumno(aid), load())
+                def go_det(aid, cid):
+                    state["st_view"] = aid
+                    state["curso_id"] = cid
+                    page.go("/student_detail")
+                
+                def edit_clk(aid):
+                    return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
+                
+                def del_clk(aid):
+                    return lambda e: (delete_alumno(aid), load())
                 
                 list_tile = ft.ListTile(
                     leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY),
@@ -478,8 +497,7 @@ def main(page: ft.Page):
                     ft.ElevatedButton("Pedidos", icon="assignment", height=50, on_click=lambda _: page.go("/pedidos"), bgcolor="#F57C00", color="white", expand=True),
                     ft.ElevatedButton("Reportes", icon="bar_chart", height=50, on_click=lambda _: page.go("/reportes"), bgcolor="#00897B", color="white", expand=True)
                 ], spacing=10), padding=ft.padding.only(bottom=20)),
-                ft.Row([ft.Text("Alumnos", size=22, weight="bold", color=SECONDARY), ft.IconButton("person_add", icon_color="white", bgcolor=SUCCESS, on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))
-                ], alignment="spaceBetween"),
+                ft.Row([ft.Text("Alumnos", size=22, weight="bold", color=SECONDARY), ft.IconButton("person_add", icon_color="white", bgcolor=SUCCESS, on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))], alignment="spaceBetween"),
                 ft.Container(height=10), col
             ]), padding=20, bgcolor=BG_COLOR, expand=True)
         ])
@@ -489,9 +507,14 @@ def main(page: ft.Page):
         col = ft.Column(scroll="auto", expand=True); vals = {}
         def load(e=None):
             try: 
-                if date.fromisoformat(dp.value).weekday() >= 5: show_snack("⚠️ Es fin de semana.", "orange")
-            except: show_snack("Fecha inválida.", DANGER); return
-            ex = get_asistencia_diaria(state["curso_id"], dp.value); col.controls.clear(); vals.clear()
+                if date.fromisoformat(dp.value).weekday() >= 5:
+                    show_snack("⚠️ Es fin de semana.", "orange")
+            except:
+                show_snack("Fecha inválida.", DANGER)
+                return
+            ex = get_asistencia_diaria(state["curso_id"], dp.value)
+            col.controls.clear()
+            vals.clear()
             for a in get_alumnos(state["curso_id"]):
                 dd = ft.Dropdown(options=[ft.dropdown.Option(x) for x in ["P","T","A","J","S","N"]], value=ex.get(a['id'], "P"), width=80, bgcolor="white", border_radius=8, content_padding=10)
                 vals[a['id']] = dd
@@ -504,7 +527,8 @@ def main(page: ft.Page):
                 if d.weekday() >= 5: return show_snack("Es fin de semana", DANGER)
             except: return show_snack("Fecha inválida", DANGER)
             for aid, dd in vals.items(): register_asistencia(aid, state["curso_id"], dp.value, dd.value)
-            show_snack("Guardado"); page.go("/curso")
+            show_snack("Guardado")
+            page.go("/curso")
         load()
         return ft.View("/asistencia", [
             ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/curso")), title=ft.Text("Tomar Asistencia"), bgcolor=PRIMARY, color="white"),
@@ -516,7 +540,8 @@ def main(page: ft.Page):
         d2 = ft.TextField(label="Hasta", value=date.today().isoformat(), width=130, bgcolor="white", border_radius=8)
         table_cont = ft.Column(scroll="auto", expand=True)
         def gen(e):
-            data = get_report_data(state["curso_id"], d1.value, d2.value); rows = []
+            data = get_report_data(state["curso_id"], d1.value, d2.value)
+            rows = []
             for d in data:
                 c = DANGER if d['faltas']>=25 else "black"
                 rows.append(ft.DataRow(cells=[
@@ -526,14 +551,17 @@ def main(page: ft.Page):
                     ft.DataCell(ft.Text(f"{d['pct']}%", color=c, weight="bold"))
                 ]))
             dt = ft.DataTable(columns=[ft.DataColumn(ft.Text("Alumno")), ft.DataColumn(ft.Text("P"), numeric=True), ft.DataColumn(ft.Text("T"), numeric=True), ft.DataColumn(ft.Text("A"), numeric=True), ft.DataColumn(ft.Text("J"), numeric=True), ft.DataColumn(ft.Text("S"), numeric=True), ft.DataColumn(ft.Text("Faltas"), numeric=True), ft.DataColumn(ft.Text("% Aus."), numeric=True)], rows=rows, bgcolor="white", border_radius=10, column_spacing=15, heading_row_color="#E3F2FD", heading_row_height=40)
-            table_cont.controls = [create_card(ft.Row([dt], scroll="always"), padding=0)]; page.update()
+            table_cont.controls = [create_card(ft.Row([dt], scroll="always"), padding=0)]
+            page.update()
         
         def export(e):
             if not pd: return show_snack("Falta pandas", DANGER)
             data = get_report_data(state["curso_id"], d1.value, d2.value)
             if not data: return show_snack("Sin datos", "orange")
             df = pd.DataFrame(data).rename(columns={'nombre':'Alumno', 'p':'Pres', 't':'Tarde', 'a':'Aus', 'j':'Just', 's':'Susp', 'faltas':'Total', 'pct':'%'})
-            output = io.BytesIO(); df.to_excel(output, index=False, engine='xlsxwriter'); b64 = base64.b64encode(output.getvalue()).decode()
+            output = io.BytesIO()
+            df.to_excel(output, index=False, engine='xlsxwriter')
+            b64 = base64.b64encode(output.getvalue()).decode()
             page.launch_url(f"data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}", web_window_name="reporte.xlsx")
 
         return ft.View("/reportes", [
@@ -542,11 +570,18 @@ def main(page: ft.Page):
         ])
 
     def search_view():
-        term = state["search"]; res = search_students(term); col = ft.Column(scroll="auto")
-        if not res: col.controls.append(ft.Text("Sin resultados", color="grey", size=16))
+        term = state["search"]
+        res = search_students(term)
+        col = ft.Column(scroll="auto")
+        if not res:
+            col.controls.append(ft.Text("Sin resultados", color="grey", size=16))
         else:
             for r in res:
-                def go_det(s): state["st_view"] = s['id']; state["curso_id"] = s['curso_id']; page.go("/student_detail")
+                def go_det(s):
+                    state["st_view"] = s['id']
+                    state["curso_id"] = s['curso_id']
+                    page.go("/student_detail")
+                
                 col.controls.append(create_card(content=ft.ListTile(leading=ft.Icon("person", color=PRIMARY, size=30), title=ft.Text(r['nombre'], weight="bold"), subtitle=ft.Text(f"Curso: {r['curso_nombre']} ({r['ciclo_nombre']})"), on_click=lambda e, s=r: go_det(s), trailing=ft.Icon("chevron_right", color="grey"))))
         return ft.View("/search", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/dashboard")), title=ft.Text(f"Búsqueda: {term}"), bgcolor=PRIMARY, color="white"), ft.Container(content=col, padding=20, bgcolor=BG_COLOR, expand=True)])
 
@@ -695,8 +730,10 @@ def main(page: ft.Page):
 if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     if port_env:
-        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
+        # NUBE (Render/Railway): Puerto del entorno + 0.0.0.0
+        print(f"Iniciando en puerto {port_env}")
         ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # LOCAL: Automático
-        ft.app(target=main, view=ft.WEB_BROWSER, port=8550)
+        # LOCAL: Puerto fijo + localhost (para evitar error 0.0.0.0)
+        print("Iniciando local en 8550...")
+        ft.app(target=main, view=ft.WEB_BROWSER, port=8550, host="127.0.0.1")
