@@ -48,10 +48,8 @@ def init_db():
 
     # Migración de columnas
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
-        try:
-            cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
-        except:
-            pass
+        try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
+        except: pass
 
     # Datos por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
@@ -130,7 +128,8 @@ def get_alumnos(curso_id):
 def add_alumno(cid, nombre, dni, obs, t_n, t_t):
     try:
         conn = get_db_connection()
-        conn.execute("INSERT INTO Alumnos (curso_id, nombre, dni, observaciones, tutor_nombre, tutor_telefono) VALUES (?,?,?,?,?,?)", (cid, nombre, dni, obs, t_n, t_t))
+        conn.execute("INSERT INTO Alumnos (curso_id, nombre, dni, observaciones, tutor_nombre, tutor_telefono) VALUES (?,?,?,?,?,?)", 
+                     (cid, nombre, dni, obs, t_n, t_t))
         conn.commit()
         conn.close()
         return True
@@ -139,7 +138,8 @@ def add_alumno(cid, nombre, dni, obs, t_n, t_t):
 
 def update_alumno(aid, nombre, dni, obs, t_n, t_t):
     conn = get_db_connection()
-    conn.execute("UPDATE Alumnos SET nombre=?, dni=?, observaciones=?, tutor_nombre=?, tutor_telefono=? WHERE id=?", (nombre, dni, obs, t_n, t_t, aid))
+    conn.execute("UPDATE Alumnos SET nombre=?, dni=?, observaciones=?, tutor_nombre=?, tutor_telefono=? WHERE id=?", 
+                 (nombre, dni, obs, t_n, t_t, aid))
     conn.commit()
     conn.close()
 
@@ -192,11 +192,14 @@ def get_student_stats(aid):
     conn = get_db_connection()
     rows = conn.execute("SELECT status FROM Asistencia WHERE alumno_id = ?", (aid,)).fetchall()
     conn.close()
+    
     statuses = [r['status'] for r in rows]
     counts = {k: statuses.count(k) for k in ['P','T','A','J','S','N']}
+    
     faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
     total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
     pct = (faltas/total*100) if total > 0 else 0
+    
     return {
         'presentes': counts['P'], 'tardes': counts['T'], 'ausentes': counts['A'],
         'justificadas': counts['J'], 'suspensiones': counts['S'],
@@ -209,14 +212,14 @@ def get_report_data(curso_id, start, end):
     alumnos = conn.execute("SELECT * FROM Alumnos WHERE curso_id=?", (curso_id,)).fetchall()
     asistencias = conn.execute("SELECT alumno_id, status FROM Asistencia WHERE fecha >= ? AND fecha <= ? AND alumno_id IN (SELECT id FROM Alumnos WHERE curso_id=?)", (start, end, curso_id)).fetchall()
     conn.close()
-    
+
     asis_map = {} 
     for r in asistencias:
         aid = r['alumno_id']
         if aid not in asis_map:
             asis_map[aid] = []
         asis_map[aid].append(r['status'])
-        
+
     report = []
     for a in alumnos:
         statuses = asis_map.get(a['id'], [])
@@ -224,6 +227,7 @@ def get_report_data(curso_id, start, end):
         faltas = counts['A'] + counts['S'] + (counts['T'] * 0.25)
         total = counts['P'] + counts['T'] + counts['A'] + counts['J'] + counts['S']
         pct = (faltas/total*100) if total > 0 else 0
+        
         report.append({
             'nombre': a['nombre'], 'dni': a['dni'], 
             'p': counts['P'], 't': counts['T'], 'a': counts['A'], 
@@ -232,6 +236,7 @@ def get_report_data(curso_id, start, end):
         })
     return report
 
+# --- Admin ---
 def get_users():
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Usuarios").fetchall()
@@ -263,7 +268,7 @@ def get_ciclos():
 def add_ciclo(nombre):
     try:
         conn = get_db_connection()
-        conn.execute("UPDATE Ciclos SET activo = 0") 
+        conn.execute("UPDATE Ciclos SET activo = 0")
         conn.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (nombre,))
         conn.commit()
         conn.close()
@@ -278,7 +283,7 @@ def activar_ciclo(cid):
     conn.commit()
     conn.close()
 
-# --- Requisitos (Documentación) ---
+# --- Requisitos ---
 def get_requisitos(cid):
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Requisitos WHERE curso_id=?", (cid,)).fetchall()
@@ -321,25 +326,27 @@ def get_student_req_status(aid, cid):
     return res
 
 # ======================================================================
-# 2. INTERFAZ GRÁFICA (Flet - Estilo Simple y Compatible)
+# 2. INTERFAZ GRÁFICA (Flet)
 # ======================================================================
 
 def main(page: ft.Page):
-    page.title = "Sistema de Asistencia UNSAM"
+    page.title = "Asistencia UNSAM"
     page.theme_mode = "light"
     page.padding = 0
     
-    # Definiciones de estilo simple para máxima compatibilidad
-    PRIMARY = "blue"
-    SECONDARY = "black"
+    # Colores Hex
+    PRIMARY = "#3F51B5"
+    SECONDARY = "#1A237E"
     BG_COLOR = "#F0F0F0" # Gris muy claro
-    CARD_COLOR = "white"
-    DANGER = "red"
-    SUCCESS = "green"
+    CARD_COLOR = "#FFFFFF"
+    DANGER = "#E53935"
+    SUCCESS = "#43A047"
     
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        print(f"Error DB: {e}")
     
-    # Estado de la aplicación
     state = {
         "role": None, "username": None, 
         "curso_id": None, "curso_nombre": None, 
@@ -351,7 +358,6 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
-    # Componente: Tarjeta (simulada con Container)
     def create_card(content, padding=15, on_click=None):
         return ft.Container(
             content=content, padding=padding, bgcolor=CARD_COLOR, border_radius=8,
@@ -427,7 +433,6 @@ def main(page: ft.Page):
             page.update()
         
         def go_curso(cid, cn): state["curso_id"]=cid; state["curso_nombre"]=cn; page.go("/curso")
-        
         def add_c(e): 
             if ciclo: page.go("/form_curso")
             else: show_snack("Falta Ciclo Activo", DANGER)
@@ -454,7 +459,15 @@ def main(page: ft.Page):
                 def go_det(aid, cid): state["st_view"] = aid; state["curso_id"] = cid; page.go("/student_detail")
                 def edit_clk(aid): return lambda e: (state.update({"st_edit": aid}), page.go("/form_student"))
                 def del_clk(aid): return lambda e: (delete_alumno(aid), load())
-                col.controls.append(create_card(content=ft.ListTile(leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY), title=ft.Text(a['nombre'], weight="bold"), subtitle=ft.Text(f"DNI: {a.get('dni','-')}"), on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]), trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])), padding=0))
+                
+                list_tile = ft.ListTile(
+                    leading=ft.CircleAvatar(content=ft.Text(a['nombre'][0]), bgcolor="#E3F2FD", color=PRIMARY),
+                    title=ft.Text(a['nombre'], weight="bold"),
+                    subtitle=ft.Text(f"DNI: {a.get('dni','-')}"),
+                    on_click=lambda e, s=a: go_det(s['id'], state["curso_id"]),
+                    trailing=ft.PopupMenuButton(icon="more_vert", items=[ft.PopupMenuItem("Editar", icon="edit", on_click=edit_clk(a['id'])), ft.PopupMenuItem("Borrar", icon="delete", on_click=del_clk(a['id']))])
+                )
+                col.controls.append(create_card(list_tile, padding=5))
             page.update()
         load()
         return ft.View("/curso", [
@@ -465,7 +478,8 @@ def main(page: ft.Page):
                     ft.ElevatedButton("Pedidos", icon="assignment", height=50, on_click=lambda _: page.go("/pedidos"), bgcolor="#F57C00", color="white", expand=True),
                     ft.ElevatedButton("Reportes", icon="bar_chart", height=50, on_click=lambda _: page.go("/reportes"), bgcolor="#00897B", color="white", expand=True)
                 ], spacing=10), padding=ft.padding.only(bottom=20)),
-                ft.Row([ft.Text("Alumnos", size=22, weight="bold", color=SECONDARY), ft.IconButton("person_add", icon_color="white", bgcolor=SUCCESS, on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))], alignment="spaceBetween"),
+                ft.Row([ft.Text("Alumnos", size=22, weight="bold", color=SECONDARY), ft.IconButton("person_add", icon_color="white", bgcolor=SUCCESS, on_click=lambda _: (state.update({"st_edit": None}), page.go("/form_student")))
+                ], alignment="spaceBetween"),
                 ft.Container(height=10), col
             ]), padding=20, bgcolor=BG_COLOR, expand=True)
         ])
@@ -682,7 +696,7 @@ if __name__ == "__main__":
     port_env = os.environ.get("PORT")
     if port_env:
         # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
         # LOCAL: Automático
-        ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=8550)
+        ft.app(target=main, view=ft.WEB_BROWSER, port=8550)
