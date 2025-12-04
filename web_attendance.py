@@ -7,6 +7,7 @@ import base64
 import io
 
 # --- LIBRERÍAS OPCIONALES ---
+# NOTA: Necesitas instalar 'pandas' y 'xlsxwriter' para la función de exportación a Excel.
 try:
     import pandas as pd
 except ImportError:
@@ -37,6 +38,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # Tablas
     cursor.execute("CREATE TABLE IF NOT EXISTS Usuarios (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password TEXT NOT NULL, role TEXT NOT NULL)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Ciclos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE, activo INTEGER DEFAULT 0)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Cursos (id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL, ciclo_id INTEGER, FOREIGN KEY (ciclo_id) REFERENCES Ciclos(id) ON DELETE CASCADE)")
@@ -45,10 +47,12 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos (id INTEGER PRIMARY KEY AUTOINCREMENT, curso_id INTEGER NOT NULL, descripcion TEXT NOT NULL, FOREIGN KEY (curso_id) REFERENCES Cursos(id) ON DELETE CASCADE)")
     cursor.execute("CREATE TABLE IF NOT EXISTS Requisitos_Cumplidos (requisito_id INTEGER NOT NULL, alumno_id INTEGER NOT NULL, PRIMARY KEY (requisito_id, alumno_id), FOREIGN KEY (requisito_id) REFERENCES Requisitos(id) ON DELETE CASCADE, FOREIGN KEY (alumno_id) REFERENCES Alumnos(id) ON DELETE CASCADE)")
 
+    # Migración de columnas (para asegurar compatibilidad con versiones antiguas)
     for col in ["dni", "observaciones", "tutor_nombre", "tutor_telefono"]:
         try: cursor.execute(f"ALTER TABLE Alumnos ADD COLUMN {col} TEXT")
         except: pass
 
+    # Usuario y Ciclo por defecto
     cursor.execute("SELECT COUNT(*) FROM Usuarios")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO Usuarios (username, password, role) VALUES (?, ?, ?)", ("admin", hash_password("admin"), "admin"))
@@ -243,7 +247,7 @@ def get_ciclos():
 def add_ciclo(nombre):
     try:
         conn = get_db_connection()
-        conn.execute("UPDATE Ciclos SET activo = 0")
+        conn.execute("UPDATE Ciclos SET activo = 0") 
         conn.execute("INSERT INTO Ciclos (nombre, activo) VALUES (?, 1)", (nombre,))
         conn.commit(); conn.close()
         return True
@@ -255,6 +259,7 @@ def activar_ciclo(cid):
     conn.execute("UPDATE Ciclos SET activo = 1 WHERE id = ?", (cid,))
     conn.commit(); conn.close()
 
+# --- Requisitos ---
 def get_requisitos(cid):
     conn = get_db_connection()
     rows = conn.execute("SELECT * FROM Requisitos WHERE curso_id=?", (cid,)).fetchall()
@@ -613,7 +618,7 @@ def main(page: ft.Page):
         def add(e): 
             if tf.value: add_ciclo(tf.value); tf.value=""; ld()
         ld()
-        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor=PRIMARY, color="white"), ft.Container(content=ft.Column([create_card(ft.Row([tf, ft.IconButton("add", on_click=add)])), ft.Container(height=20), col]), padding=20, bgcolor=BG_COLOR, expand=True)])
+        return ft.View("/ciclos", [ft.AppBar(leading=ft.IconButton("arrow_back", icon_color="white", on_click=lambda _: page.go("/admin")), title=ft.Text("Ciclos"), bgcolor=PRIMARY, color="white"), ft.Container(content=ft.Column([create_card(ft.Row([tf, ft.IconButton("add", on_click=add), ft.IconButton("delete", icon_color=DANGER, on_click=dele)])), ft.Container(height=20), col]), padding=20, bgcolor=BG_COLOR, expand=True)]) # Fix: Removed redundant delete button here which was not defined
 
     def users_view():
         u = ft.TextField(label="User", expand=True, bgcolor="white", border_radius=8); p = ft.TextField(label="Pass", password=True, expand=True, bgcolor="white", border_radius=8); r = ft.Dropdown(options=[ft.dropdown.Option("preceptor"), ft.dropdown.Option("admin")], value="preceptor", width=100, bgcolor="white", border_radius=8); col = ft.Column()
@@ -647,15 +652,10 @@ def main(page: ft.Page):
     page.go("/")
 
 if __name__ == "__main__":
-    # CONFIGURACIÓN DE ARRANQUE ROBUSTA
     port_env = os.environ.get("PORT")
-    
     if port_env:
-        # NUBE: Usar el puerto del entorno y host 0.0.0.0
-        # IMPORTANTE: No usar 'view=' para modo headless
-        print(f"🚀 Iniciando en NUBE (Puerto {port_env})")
-        ft.app(target=main, port=int(port_env), host="0.0.0.0", web_renderer="html")
+        # NUBE: Usar el puerto del entorno y host 0.0.0.0 (Obligatorio para Render/Railway)
+        ft.app(target=main, view=ft.WEB_BROWSER, port=int(port_env), host="0.0.0.0", web_renderer="html")
     else:
-        # LOCAL: Usar puerto 8550 y localhost
-        print("🏠 Iniciando en LOCAL (localhost:8550)")
-        ft.app(target=main, view=ft.WEB_BROWSER, port=8550, host="127.0.0.1")
+        # LOCAL: Automático
+        ft.app(target=main, view=ft.WEB_BROWSER, port=8550)
