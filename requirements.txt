@@ -2,6 +2,3 @@ flet
 pandas
 openpyxl
 xlsxwriter
-uvicorn
-
-
